@@ -1,0 +1,31 @@
+# Virtual environment
+.venv/
+
+# Artifacts & outputs
+artifacts/
+
+# Logs
+logs/
+
+# Data files (optional — ignore if sensitive/large)
+data/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyCharm project files
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+*.env

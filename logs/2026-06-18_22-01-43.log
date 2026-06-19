@@ -1,4 +1,0 @@
-2026-06-18 22:01:43 | task_detector | INFO | load_data called | file: regression_sample.csv
-2026-06-18 22:01:43 | task_detector | DEBUG | Full path resolved: C:\Users\Shyam\PycharmProjects\AutoML\data\regression_sample.csv
-2026-06-18 22:01:43 | task_detector | DEBUG | Used pd.read_csv
-2026-06-18 22:01:43 | task_detector | INFO | Data loaded successfully | Shape: 6 rows × 5 cols | File: regression_sample.csv
