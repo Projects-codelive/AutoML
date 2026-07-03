@@ -43,6 +43,7 @@ def load_data(path: str | Path) -> pd.DataFrame | None:
         f"Shape: {df.shape[0]} rows × {df.shape[1]} cols | "
         f"File: {path.name}")
     return df
+
 def determine_type_of_PS(data, target_col=None):
     if target_col is None:
         logger.info("No target column provided → Task Type: Clustering")

@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from automl.logger import get_logger
 import re
+import json
 
 logger = get_logger("Eda")
 def basic_info(df: pd.DataFrame):
@@ -16,6 +17,8 @@ def basic_info(df: pd.DataFrame):
     logger.info(f'Number of columns: {number_of_column}')
     logger.info(f'Duplicates: {duplicates}')
     logger.info(f'Memory usage: {mem_mb:.2f} MB')
+    return {"rows": number_of_row, "columns": number_of_column,
+            "duplicates": int(duplicates), "memory_mb": round(mem_mb, 2)}
 
 _BOOL_MAP = {
     "yes": 1, "no": 0, "true": 1, "false": 0,
@@ -163,4 +166,354 @@ def run_basic_cleaning(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     return df, report
 
+def get_column_types(df: pd.DataFrame) -> dict:
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    bool_cols = df.select_dtypes(include="bool").columns.tolist()
+    datetime_cols = df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
 
+    numerical_continuous = [c for c in num_cols if df[c].nunique() > 15]
+    numerical_discrete   = [c for c in num_cols if df[c].nunique() <= 15]
+
+    return {
+        "numerical_continuous": numerical_continuous,
+        "numerical_discrete": numerical_discrete,
+        "categorical": cat_cols,
+        "boolean": bool_cols,
+        "datetime": datetime_cols,
+    }
+
+def missing_value(df: pd.DataFrame) -> pd.DataFrame:
+    report = []
+    most_missing = []
+    for col in df.columns:
+        missing_val = df[col].isnull().sum()
+        if missing_val > 0:
+            missing_pct = (missing_val / len(df)) * 100
+            if missing_pct > 30:
+                most_missing.append(col)
+            report.append({
+                "Column": col,
+                "Missing Count": missing_val,
+                "Missing Percentage": missing_pct
+            })
+    logger.warning(f"Columns with >30% missing (need special treatment): {most_missing}")
+    report_df = pd.DataFrame(report)
+    if not report_df.empty:
+        report_df = report_df.sort_values(by="Missing Percentage", ascending=False).reset_index(drop=True)
+    return report_df, most_missing
+
+def plot_missing_values(df: pd.DataFrame, save_path: str = None):
+    missing_pct = (df.isnull().sum() / len(df)) * 100
+    missing_pct = missing_pct[missing_pct > 0].sort_values(ascending=False)
+    if missing_pct.empty:
+        print("No missing values to plot")
+        return
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x=missing_pct.values, y=missing_pct.index, color="steelblue")
+    plt.title("Missing Values by Column (%)")
+    plt.xlabel("Missing (%)")
+    plt.ylabel("Column")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+
+def descriptive_statics(df: pd.DataFrame):
+    numerical_col = df.select_dtypes(include=["number", "float", "int64"]).columns.tolist()
+    categorical_col = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    stats_report = {"numerical": {}, "categorical": {}}
+    highly_skewd = []
+    # Statics extraction for the numerical columns
+    for col in numerical_col:
+        mean = df[col].mean()
+        median = df[col].median()
+        std = df[col].std()
+        min = df[col].min()
+        max = df[col].max()
+        skewness = df[col].skew()
+        if(abs(skewness) > 1):
+            highly_skewd.append(col)
+        kurtosis = df[col].kurt()
+        logger.info(f"Column: {col}")
+        logger.info(f"mean: {mean:.4f}")      # The :.4f rounds the number to 4 decimal places for cleaner output
+        logger.info(f"median: {median:.4f}")
+        logger.info(f"std: {std:.4f}")
+        logger.info(f"min: {min:.4f}")
+        logger.info(f"max: {max:.4f}")
+        logger.info(f"skewness: {skewness:.4f}")
+        logger.info(f"kurtosis: {kurtosis:.4f}")
+        logger.info("-" * 20)
+        stats_report["numerical"][col] = {
+            "mean": mean,
+            "median": median,
+            "std": std,
+            "min": min,
+            "max": max,
+            "skew": skewness,
+            "kurtosis": kurtosis
+        }
+    logger.info(f"{highly_skewd} this column has more skweness So we need Special treatment like log/sqrt transform")
+    logger.info("-" * 20)
+    # Statics extraction for the Categorial columns
+    for col in categorical_col:
+        counts = df[col].value_counts()
+        top_value = counts.index[0]
+        top_frequency = counts.iloc[0]
+        total_non_null = df[col].notna().sum()
+        top_pct = round((top_frequency / total_non_null) * 100, 2)
+        logger.info(f"Column: {col}")
+        logger.info(f"unique count: {df[col].nunique()}")
+        logger.info(f"top value: {top_value}")
+        logger.info(f"top value frequency: {top_frequency} ({top_pct}%)")
+        if top_pct > 95:
+            logger.warning(f"'{col}' is quasi-constant — {top_pct}% rows are '{top_value}'")
+        logger.info("-" * 20)
+        stats_report["categorical"][col] = {
+            "unique_count": df[col].nunique(),
+            "top_value": top_value,
+            "top_frequency": int(top_frequency),
+            "top_pct": top_pct,
+        }
+    return stats_report, highly_skewd
+
+def Outlier_detection(df: pd.DataFrame):
+    numerical_col = df.select_dtypes(include=["number", "float", "int64"]).columns.tolist()
+    outlier_report = {}
+    for col in numerical_col:
+        q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
+        iqr = q3-q1
+        lower_limit = q1 - 1.5 * iqr
+        upper_limit = q3 + 1.5 * iqr
+        mask = (df[col] < lower_limit) | (df[col] > upper_limit)
+        count = int(mask.sum())
+        pct = round(count / len(df) * 100, 2)
+        outlier_report[col] = {"count": count, "percentage": pct}
+    return outlier_report
+
+
+# Step 6 — Cardinality Check on Categoricals
+def check_cardianility(df: pd.DataFrame) -> pd.DataFrame:
+    report = {
+        "Low Cardinality Prefer One Hot": set(),
+        "High Cardinality Prefer Target / Feature Encoding": set(),
+        "Flagged as Quasi-Constant! Consider dropping": set()
+    }
+    categorical_col = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    for col in categorical_col:
+        # Edge case: If a column is completely empty, skip it to avoid errors
+        if df[col].dropna().empty:
+            continue
+        dominant_value_percentage = df[col].value_counts(normalize=True).iloc[0]
+        unique_count = df[col].nunique()
+        if dominant_value_percentage > 0.95:
+            report["Flagged as Quasi-Constant! Consider dropping"].add(col)
+        if unique_count <= 30:
+            report["Low Cardinality Prefer One Hot"].add(col)
+        else:
+            report["High Cardinality Prefer Target / Feature Encoding"].add(col)
+    return report
+
+# Step 7 — Target Column Analysis (Supervised only)
+def target_column_analysis(df: pd.DataFrame, task_type: str, target_col: str, save_path: str = None):
+    if task_type == "Clustering":
+        return None
+    if target_col not in df.columns:
+        logger.error("Column is not found in the dataframe")
+        return None
+    y = df[target_col]
+    if task_type == "Classification":
+        counts = y.value_counts()
+        percentage = y.value_counts(normalize=True) * 100
+        logger.info(f"Target column: {target_col}")
+        logger.info(f"Number of classes: {y.nunique()}")
+        logger.info(f"Counts: {counts}")
+        logger.info(f"Percentage: {percentage.round(2)}")
+        # Plot
+        plt.figure(figsize=(8, 5))
+        sns.countplot(x=y)
+        plt.title(f"Class Distribution — {target_col}")
+        plt.xlabel(target_col)
+        plt.ylabel("Count")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
+        # Imbalance Ratio
+        imbalance_ratio = counts.max() / counts.min()
+        logger.info(f"Imbalance ratio (majority/minority): {imbalance_ratio:.2f}")
+        # ── Flag minority classes < 5% share ────────────────────────────
+        minority_classes = percentage[percentage < 5]
+        is_imbalanced = not minority_classes.empty
+        if is_imbalanced:
+            logger.warning("⚠️ Class imbalance detected — classes under 5% share:")
+            logger.info(minority_classes.round(2))
+        else:
+            logger.info("Class distribution looks balanced")
+
+        return {
+            "class_counts": counts.to_dict(),
+            "class_percentages": percentage.to_dict(),
+            "imbalance_ratio": imbalance_ratio,
+            "is_imbalanced": is_imbalanced,
+            "minority_classes": minority_classes.index.tolist()
+        }
+    elif task_type == "Regression":
+        # ── Distribution plot ────────────────────────────────────────────
+        plt.figure(figsize=(8, 5))
+        sns.histplot(y, kde=True)
+        plt.title(f"Target Distribution — {target_col}")
+        plt.xlabel(target_col)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
+        # ── Skewness ─────────────────────────────────────────────────────
+        skewness = y.skew()
+        is_skewed = abs(skewness) > 1
+        logger.info(f"Target column: {target_col}")
+        logger.info(f"Skewness: {skewness:.3f}")
+        if is_skewed:
+            logger.warning("⚠️ Target is highly skewed — consider log transform")
+        else:
+            logger.info("Target distribution looks roughly normal")
+        return {
+            "skewness": skewness,
+            "is_skewed": is_skewed,
+            "mean": y.mean(),
+            "median": y.median(),
+            "std": y.std()
+        }
+    else:
+        logger.error(f"Unknown task_type: {task_type} — skipping target analysis")
+        return None
+
+# Step 8 — Correlation Analysis (Numerical)
+def correlation_Analysis(df: pd.DataFrame, task_type: str = None, target_col: str = None, threshold: float = 0.85, save_path: str = None):
+    numerical_column = numerical_col = df.select_dtypes(include=["number", "float", "int64"]).columns.tolist()
+    if len(numerical_column) < 2:
+        logger.error("Not enough numerical columns to compute correlations")
+        return None
+    corr_matrix = df[numerical_col].corr(method="pearson")
+    # ── Heatmap ──────────────────────────────────────────────────────────
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0)
+    plt.title("Pearson Correlation Matrix")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+    # Multicollineraity
+    multicollinear_pairs = []
+    for i in range(len(numerical_column)):
+        for j in range(i+1, len(numerical_column)):
+            col_a, col_b = numerical_column[i], numerical_column[j]
+            corr = corr_matrix.loc[col_a, col_b]
+            if abs(corr) > threshold:
+                multicollinear_pairs.append({
+                    "col_a": col_a,
+                    "col_b": col_b,
+                    "corr": corr
+                })
+    if multicollinear_pairs:
+        logger.info(f"Total Multicollinear pairs: {len(multicollinear_pairs)}")
+        for pair in multicollinear_pairs:
+            logger.info(f"Correlation between {pair['col_a']} and {pair['col_b']} is {pair['corr']:.3f}")
+    # ── Target correlation ranking (supervised tasks only) ──────────────────
+    target_corr_ranked = None
+    if task_type in ("Regression", "Classification") and target_col is not None:
+        if target_col not in numerical_col:
+            logger.warning(f"Target column '{target_col}' is not numeric — skipping target correlation ranking")
+        else:
+            target_corr = corr_matrix[target_col].drop(index=target_col)
+            target_corr_ranked = target_corr.reindex(
+                target_corr.abs().sort_values(ascending=False).index
+            )
+            logger.info(f"\nFeature correlation with target '{target_col}' (ranked by |corr|):")
+            logger.info(target_corr_ranked.round(3))
+
+    return {
+        "corr_matrix": corr_matrix,
+        "multicollinear_pairs": multicollinear_pairs,
+        "target_corr_ranked": target_corr_ranked
+    }
+
+
+def _make_json_safe(obj):
+    """Recursively convert numpy/pandas objects into JSON-serializable types."""
+    if isinstance(obj, dict):
+        return {str(k): _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_make_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, pd.Series):
+        return _make_json_safe(obj.to_dict())
+    if isinstance(obj, pd.DataFrame):
+        return _make_json_safe(obj.to_dict(orient="records"))
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    return obj
+
+
+def save_eda_artifacts(df, columns_type, task_type, target_col, cleaning_report,
+                        missing_report, high_missing_cols, highly_skewed, desc_stats, outlier_report,
+                        cardinality_report, target_analysis_result, correlation_result,
+                        output_dir="artifacts/eda"):
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_missing_values(df, save_path=out_dir / "missing_values.png")
+    # ── Build summary ─────────────────────────────────────────────────
+    eda_summary = {
+        "column_types": columns_type,
+        "task_type": task_type,
+        "target_col": target_col,
+        "n_rows": df.shape[0],
+        "n_columns": df.shape[1],
+        "cleaning_report": cleaning_report,
+        "high_missing_cols": high_missing_cols,
+        "highly_skewed_cols": highly_skewed,
+        "missing_report": missing_report,
+        "descriptive_stats": desc_stats,
+        "outlier_report": outlier_report,
+        "cardinality_report": cardinality_report,
+        "target_analysis": target_analysis_result,
+        "correlation": {
+            "multicollinear_pairs": correlation_result["multicollinear_pairs"] if correlation_result else [],
+            "target_corr_ranked": correlation_result["target_corr_ranked"] if correlation_result else None,
+        } if correlation_result else None,
+    }
+    safe_summary = _make_json_safe(eda_summary)
+    with open(out_dir / "eda_summary.json", "w") as f:
+        json.dump(safe_summary, f, indent=2)
+
+    print(f"Artifacts saved to {out_dir.resolve()}")
+    return eda_summary
+
+
+def run_eda(df: pd.DataFrame, task_type: str = None, target_col: str = None, cleaning_report: dict = None, output_dir: str = "artifacts/eda"):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    basic_info(df)
+    columns_type = get_column_types(df)
+    missing_report, high_missing_cols = missing_value(df)
+    desc_stats, highly_skewed = descriptive_statics(df)
+    outlier_report = Outlier_detection(df)
+    cardinality_report = check_cardianility(df)
+    target_analysis_result = target_column_analysis(df, task_type, target_col,
+                                save_path=Path(output_dir) / "target_distribution.png")
+    correlation_result = correlation_Analysis(df, task_type, target_col,
+                                save_path=Path(output_dir) / "correlation_heatmap.png")
+    eda_summary = save_eda_artifacts(
+        df, columns_type, task_type, target_col, cleaning_report, missing_report,
+        high_missing_cols, highly_skewed, desc_stats, outlier_report,
+        cardinality_report, target_analysis_result,
+        correlation_result, output_dir=output_dir
+    )
+    return eda_summary
