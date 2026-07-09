@@ -8,3 +8,7 @@ xgboost
 Flask
 dill
 openpyxl
+openai
+imbalanced-learn
+statsmodels
+python-dotenv

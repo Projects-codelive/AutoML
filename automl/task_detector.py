@@ -68,5 +68,5 @@ def determine_type_of_PS(data, target_col=None):
         return "Unknown"
 
 
-output = determine_type_of_PS(load_data(Path("../data/regression_sample.csv")), target_col="Price_Thousands")
-print(output)
+# output = determine_type_of_PS(load_data(Path("../data/regression_sample.csv")), target_col="Price_Thousands")
+# print(output)
