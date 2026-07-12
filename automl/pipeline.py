@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
+from automl.feature_engineer import run_feature_engineering
 from automl.task_detector import load_data, determine_type_of_PS
 from automl.preprocessor import run_preprocessor
 from automl.logger import get_logger
@@ -15,6 +16,7 @@ def run_pipeline(
     target_col: str = None,
     eda_output_dir: str = "artifacts/eda",
     preprocessor_output_dir: str = "artifacts/preprocessor",
+    feature_engineer_output_dir: str = "artifacts/feature_engineering",
     api_key: str = None           # pass OpenAI key here, never hardcode
 ):
     logger.info("=" * 60)
@@ -77,13 +79,29 @@ def run_pipeline(
     logger.info(f"X_train shape: {preprocessor_result['X_train'].shape}")
     logger.info(f"X_test shape : {preprocessor_result['X_test'].shape}")
 
+    # ── Step 6 — Feature Engineering ──────────────────────────────
+    logger.info("STEP 6 — Running Feature Engineering")
+    fe_result = run_feature_engineering(
+        X_train=preprocessor_result["X_train"],
+        X_test=preprocessor_result["X_test"],
+        y_train=preprocessor_result["y_train"],
+        y_test=preprocessor_result["y_test"],
+        task_type=task_type,
+        target_col=target_col,
+        eda_summary=eda_summary,
+        api_key=api_key,
+        output_dir=feature_engineer_output_dir
+    )
+    logger.info(f"Feature engineering complete | final X_train: {fe_result['X_train'].shape}")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
 
     return {
-        "eda_summary":          eda_summary,
-        "preprocessor_result":  preprocessor_result
+        "eda_summary":                  eda_summary,
+        "preprocessor_result":          preprocessor_result,
+        "feature_engineering_result":   fe_result
     }
 
 
@@ -93,5 +111,6 @@ if __name__ == "__main__":
         target_col="price",
         eda_output_dir="../artifacts/eda",
         preprocessor_output_dir="../artifacts/preprocessor",
+        feature_engineer_output_dir="../artifacts/feature_engineer",
         api_key=os.getenv("OPENAI_API_KEY")
     )

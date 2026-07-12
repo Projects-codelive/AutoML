@@ -84,10 +84,7 @@ def impute_missing_values(x_train, x_test, eda_summary):
     x_test = x_test.copy()
     high_missing_cols = eda_summary.get("high_missing_cols", [])
     missing_value = eda_summary.get("missing_report", [])
-    missing_columns = [
-        item if isinstance(item, str) else item.get("Column")
-        for item in missing_value
-    ]
+    missing_columns = [row["Column"] for row in eda_summary.get("missing_report", [])]
     highly_skewed_cols = eda_summary.get("highly_skewed_cols", [])
     col_types = eda_summary.get("column_types", {})
     numerical_continuous = col_types.get("numerical_continuous", [])
@@ -508,16 +505,16 @@ def scale_features(x_train, x_test, eda_summary):
 # Step 8 — Handle Class Imbalance (Classification Only)
 def handle_class_imbalance(x_train, y_train, eda_summary, task_type):
     if task_type != "Classification":
-        print(f"Skipping class imbalance — task is {task_type}")
+        logger.info(f"Skipping class imbalance — task is {task_type}")
         return x_train, y_train
     target_analysis = eda_summary.get("target_analysis", {})
     is_imbalanced = target_analysis.get("is_imbalanced", False)
     if not is_imbalanced:
-        print("Classes are balanced — no resampling needed")
+        logger.info("Classes are balanced — no resampling needed")
         return x_train, y_train
     imbalance_ratio = target_analysis.get("imbalance_ratio", 1.0)
-    print(f"Class imbalance detected | ratio: {imbalance_ratio:.2f}")
-    print(f"Class distribution before resampling:\n{y_train.value_counts()}")
+    logger.info(f"Class imbalance detected | ratio: {imbalance_ratio:.2f}")
+    logger.info(f"Class distribution before resampling:\n{y_train.value_counts()}")
     if imbalance_ratio <= 10:
         # Use Smote
         from imblearn.over_sampling import SMOTE
@@ -528,9 +525,9 @@ def handle_class_imbalance(x_train, y_train, eda_summary, task_type):
         sampler = SMOTETomek(random_state=42)
         strategy = "SMOTETomek"
     x_train_res, y_train_res = sampler.fit_resample(x_train, y_train)
-    print(f"Strategy used: {strategy}")
-    print(f"Class distribution after resampling:\n{y_train_res.value_counts()}")
-    print(f"Shape before: {x_train.shape} → after: {x_train_res.shape}")
+    logger.info(f"Strategy used: {strategy}")
+    logger.info(f"Class distribution after resampling:\n{y_train_res.value_counts()}")
+    logger.info(f"Shape before: {x_train.shape} → after: {x_train_res.shape}")
     return x_train_res, y_train_res
 
 

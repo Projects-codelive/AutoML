@@ -6,6 +6,10 @@ from pathlib import Path
 from automl.logger import get_logger
 import re
 import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 logger = get_logger("Eda")
 def basic_info(df: pd.DataFrame):
@@ -201,7 +205,7 @@ def missing_value(df: pd.DataFrame) -> pd.DataFrame:
     report_df = pd.DataFrame(report)
     if not report_df.empty:
         report_df = report_df.sort_values(by="Missing Percentage", ascending=False).reset_index(drop=True)
-    return report_df, most_missing
+    return report_df.to_dict(orient="records"), most_missing
 
 def plot_missing_values(df: pd.DataFrame, save_path: str = None):
     missing_pct = (df.isnull().sum() / len(df)) * 100
@@ -217,7 +221,6 @@ def plot_missing_values(df: pd.DataFrame, save_path: str = None):
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.show()
     plt.close()
 
 
@@ -297,9 +300,9 @@ def Outlier_detection(df: pd.DataFrame):
 # Step 6 — Cardinality Check on Categoricals
 def check_cardianility(df: pd.DataFrame) -> pd.DataFrame:
     report = {
-        "Low Cardinality Prefer One Hot": set(),
-        "High Cardinality Prefer Target / Feature Encoding": set(),
-        "Flagged as Quasi-Constant! Consider dropping": set()
+        "Low Cardinality Prefer One Hot": [],
+        "High Cardinality Prefer Target / Feature Encoding": [],
+        "Flagged as Quasi-Constant! Consider dropping": []
     }
     categorical_col = df.select_dtypes(include=["object", "category"]).columns.tolist()
     for col in categorical_col:
@@ -309,11 +312,12 @@ def check_cardianility(df: pd.DataFrame) -> pd.DataFrame:
         dominant_value_percentage = df[col].value_counts(normalize=True).iloc[0]
         unique_count = df[col].nunique()
         if dominant_value_percentage > 0.95:
-            report["Flagged as Quasi-Constant! Consider dropping"].add(col)
+            report["Flagged as Quasi-Constant! Consider dropping"].append(col)
+            continue
         if unique_count <= 30:
-            report["Low Cardinality Prefer One Hot"].add(col)
+            report["Low Cardinality Prefer One Hot"].append(col)
         else:
-            report["High Cardinality Prefer Target / Feature Encoding"].add(col)
+            report["High Cardinality Prefer Target / Feature Encoding"].append(col)
     return report
 
 # Step 7 — Target Column Analysis (Supervised only)
@@ -341,7 +345,6 @@ def target_column_analysis(df: pd.DataFrame, task_type: str, target_col: str, sa
         plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.show()
         # Imbalance Ratio
         imbalance_ratio = counts.max() / counts.min()
         logger.info(f"Imbalance ratio (majority/minority): {imbalance_ratio:.2f}")
@@ -370,7 +373,6 @@ def target_column_analysis(df: pd.DataFrame, task_type: str, target_col: str, sa
         plt.tight_layout()
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.show()
         # ── Skewness ─────────────────────────────────────────────────────
         skewness = y.skew()
         is_skewed = abs(skewness) > 1
@@ -405,7 +407,6 @@ def correlation_Analysis(df: pd.DataFrame, task_type: str = None, target_col: st
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path)
-    plt.show()
     # Multicollineraity
     multicollinear_pairs = []
     for i in range(len(numerical_column)):
@@ -436,7 +437,7 @@ def correlation_Analysis(df: pd.DataFrame, task_type: str = None, target_col: st
             logger.info(target_corr_ranked.round(3))
 
     return {
-        "corr_matrix": corr_matrix,
+        # "corr_matrix": corr_matrix,
         "multicollinear_pairs": multicollinear_pairs,
         "target_corr_ranked": target_corr_ranked
     }
