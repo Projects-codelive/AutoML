@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
 from automl.feature_engineer import run_feature_engineering
+from automl.model_registry import run_model_registry
 from automl.task_detector import load_data, determine_type_of_PS
 from automl.preprocessor import run_preprocessor
 from automl.logger import get_logger
@@ -17,7 +18,8 @@ def run_pipeline(
     eda_output_dir: str = "artifacts/eda",
     preprocessor_output_dir: str = "artifacts/preprocessor",
     feature_engineer_output_dir: str = "artifacts/feature_engineering",
-    api_key: str = None           # pass OpenAI key here, never hardcode
+    model_registry_output_dir: str = "artifacts/model_registry",
+    api_key: str = None
 ):
     logger.info("=" * 60)
     logger.info("AUTOML PIPELINE STARTED")
@@ -94,6 +96,17 @@ def run_pipeline(
     )
     logger.info(f"Feature engineering complete | final X_train: {fe_result['X_train'].shape}")
 
+    # ── Step 7 — Model Registry ──────────────────────────────
+    logger.info("Step 7 — Model Registry")
+    mr_result = run_model_registry(
+        task_type=task_type,
+        output_dir=model_registry_output_dir,
+    )
+    if mr_result is None:
+        logger.error("Pipeline aborted — model registry failed")
+        return None
+    logger.info(f"Model Registry complete | artifacts saved to: {Path(model_registry_output_dir).resolve()}")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
@@ -112,5 +125,6 @@ if __name__ == "__main__":
         eda_output_dir="../artifacts/eda",
         preprocessor_output_dir="../artifacts/preprocessor",
         feature_engineer_output_dir="../artifacts/feature_engineer",
+        model_registry_output_dir= "../artifacts/model_registry",
         api_key=os.getenv("OPENAI_API_KEY")
     )

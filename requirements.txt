@@ -12,3 +12,4 @@ openai
 imbalanced-learn
 statsmodels
 python-dotenv
+lightgbm
