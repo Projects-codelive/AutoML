@@ -3,6 +3,7 @@ from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
 from automl.feature_engineer import run_feature_engineering
 from automl.model_registry import run_model_registry
+from automl.model_trainer import run_trainer
 from automl.task_detector import load_data, determine_type_of_PS
 from automl.preprocessor import run_preprocessor
 from automl.logger import get_logger
@@ -19,6 +20,7 @@ def run_pipeline(
     preprocessor_output_dir: str = "artifacts/preprocessor",
     feature_engineer_output_dir: str = "artifacts/feature_engineering",
     model_registry_output_dir: str = "artifacts/model_registry",
+    model_trainer_output_dir: str = "artifacts/model_trainer",
     api_key: str = None
 ):
     logger.info("=" * 60)
@@ -107,15 +109,36 @@ def run_pipeline(
         return None
     logger.info(f"Model Registry complete | artifacts saved to: {Path(model_registry_output_dir).resolve()}")
 
+    # ── Step 7 — Model Trainer ──────────────────────────────
+    logger.info("Step 8 — Model Trainer")
+    mt_result = run_trainer(
+        X_train=fe_result["X_train"],
+        X_test=fe_result["X_test"],
+        y_train=fe_result["y_train"],
+        y_test=fe_result["y_test"],
+        task_type=task_type,
+        registry_result=mr_result,
+        output_dir=model_trainer_output_dir,
+        n_jobs=-1
+    )
+    if not mt_result:
+        logger.error("Pipeline aborted — model training failed")
+        return None
+    best_model_name = mt_result.get("best_model", {}).get("model_name", "Unknown")
+    logger.info(f"Model Trainer complete | best model: {best_model_name}")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
 
     return {
-        "eda_summary":                  eda_summary,
-        "preprocessor_result":          preprocessor_result,
-        "feature_engineering_result":   fe_result
+        "eda_summary": eda_summary,
+        "preprocessor_result": preprocessor_result,
+        "feature_engineering_result": fe_result,
+        "model_registry_result": mr_result,
+        "model_trainer_result": mt_result
     }
+
 
 
 if __name__ == "__main__":
@@ -126,5 +149,6 @@ if __name__ == "__main__":
         preprocessor_output_dir="../artifacts/preprocessor",
         feature_engineer_output_dir="../artifacts/feature_engineer",
         model_registry_output_dir= "../artifacts/model_registry",
+        model_trainer_output_dir= "../artifacts/model_trainer",
         api_key=os.getenv("OPENAI_API_KEY")
     )

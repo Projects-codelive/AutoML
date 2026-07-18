@@ -33,7 +33,6 @@ except ImportError:
 
 
 # Step 1 — _build_regression_models
-
 def _build_regression_models() -> dict:
     registry = {
         "ridge": {
@@ -104,7 +103,6 @@ def _build_regression_models() -> dict:
             "tags": ["fastest", "tree_based", "large_data", "handles_missing"]
         }
     return registry
-
 
 # Step 2 — _build_classification_models
 def _build_classification_models() -> dict:
@@ -188,7 +186,6 @@ def _build_classification_models() -> dict:
         }
     return registry
 
-
 # Step 3 — _build_clustering_models
 def _build_clustering_models() -> dict:
     registry = {
@@ -251,7 +248,6 @@ def _build_clustering_models() -> dict:
     }
     return registry
 
-
 # Step 4 — _build_regression_search_spaces
 def _build_regression_search_spaces():
     hyperparameter = {
@@ -308,7 +304,6 @@ def _build_regression_search_spaces():
         ]
     }
     return hyperparameter
-
 
 
 # Step 5 — _build_classification_search_spaces
@@ -781,9 +776,7 @@ def save_registry_manifest(output_dir: str = "artifacts/model_registry") -> None
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Step 14 — run_model_registry  (pipeline entry point)
-# ─────────────────────────────────────────────────────────────────────────────
 def get_search_spaces_for_task(task_type: str) -> dict:
     """
     Helper — returns the full search-space dict for a task type.
