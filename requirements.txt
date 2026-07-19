@@ -13,3 +13,4 @@ imbalanced-learn
 statsmodels
 python-dotenv
 lightgbm
+optuna

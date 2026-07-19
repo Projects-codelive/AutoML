@@ -14,6 +14,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 
+from automl.cv_utils import get_cv_strategy
 from automl.logger import get_logger
 from automl.model_registry import get_model_instance, get_all_model_keys
 
@@ -83,35 +84,6 @@ def _validate_inputs(x_train, x_test, y_train, y_test, task_type, registry_resul
             logger.error(msg)
             raise ValueError(msg)
 
-def _get_cv_strategy(task_type, y_train, n_splits=5)->object:
-    if task_type == "Clustering":
-        logger.info("CV is skipped for clustering; scoring will use the full dataset.")
-        return None
-    if n_splits < 2:
-        raise ValueError("Cross-validation requires at least 2 folds (n_splits >= 2).")
-    if len(y_train) < n_splits:
-        adjusted_splits = min(5, len(y_train))
-        logger.warning(
-            f"n_splits ({n_splits}) cannot be greater than the number of training samples "
-            f"({len(y_train)}). Reducing n_splits to {adjusted_splits}."
-        )
-        n_splits = adjusted_splits
-    if task_type == "Regression":
-        skewness = skew(y_train)
-        if skew(y_train) > 1.0:
-            logger.debug(f"Target is highly skewed (skew={skewness:.2f}). Using KFold with shuffle.")
-        else:
-            logger.debug("Target is not highly skewed. Using KFold with shuffle.")
-        return KFold(n_splits=n_splits, shuffle=True, random_state=42)
-    if task_type == "Clustering":
-        distribution = y_train.value_counts(normalize=True)
-        if (distribution < 0.10).any():
-            logger.debug("Imbalanced classes detected (< 10% representation). Using StratifiedKFold.")
-        else:
-            logger.debug("Classes are balanced. Using StratifiedKFold.")
-        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    else:
-        raise ValueError(f"Unknown task_type: {task_type}")
 
 
 def _train_single_model(model_key, model_def, X_train, X_test, y_train, y_test, task_type, cv, scoring_metric) -> dict:
@@ -301,7 +273,7 @@ def run_parallel_training(X_train, X_test, y_train, y_test, task_type, registry_
     scoring = registry_result["scoring_metric"]
     scoring_str = scoring[0]
     model_key = get_all_model_keys(task_type)
-    cv = _get_cv_strategy(task_type, y_train)
+    cv = get_cv_strategy(task_type, y_train)
     if task_type == "Clustering":
         n_rows = len(X_train)
         filtered_keys = []

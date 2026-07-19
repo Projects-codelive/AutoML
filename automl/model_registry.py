@@ -14,6 +14,8 @@ from sklearn.neighbors import KNeighborsClassifier
 
 from automl.logger import get_logger
 logger = get_logger("model_registry")
+_REGISTRY_CACHE = {}
+
 
 try:
     from xgboost import XGBRegressor, XGBClassifier
@@ -102,6 +104,7 @@ def _build_regression_models() -> dict:
             "handles_nan": True,
             "tags": ["fastest", "tree_based", "large_data", "handles_missing"]
         }
+    logger.info(f"[ModelRegistry] Loaded 8 model(s) for task 'Regression': [...]")
     return registry
 
 # Step 2 — _build_classification_models
@@ -409,6 +412,8 @@ def _build_clustering_search_spaces()->dict:
 # Step 7 — get_models
 def get_models(task_type: str):
     normalized_task = task_type.strip().title()
+    if normalized_task in _REGISTRY_CACHE:
+        return _REGISTRY_CACHE[normalized_task]
     builders = {
         "Regression": _build_regression_models,
         "Classification": _build_classification_models,
@@ -434,6 +439,7 @@ def get_models(task_type: str):
         f"[ModelRegistry] Loaded {len(registry)} model(s) for task '{normalized_task}': "
         f"{list(registry.keys())}"
     )
+    _REGISTRY_CACHE[normalized_task] = registry
     return registry
 
 

@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
 from automl.feature_engineer import run_feature_engineering
+from automl.hpo import run_hpo
 from automl.model_registry import run_model_registry
 from automl.model_trainer import run_trainer
 from automl.task_detector import load_data, determine_type_of_PS
@@ -21,6 +22,10 @@ def run_pipeline(
     feature_engineer_output_dir: str = "artifacts/feature_engineering",
     model_registry_output_dir: str = "artifacts/model_registry",
     model_trainer_output_dir: str = "artifacts/model_trainer",
+    hpo_output_dir: str = "artifacts/hpo",
+    hpo_n_trials: int = 50,
+    hpo_top_n_models: int = 3,
+    hpo_timeout_per_model: int = 600,
     api_key: str = None
 ):
     logger.info("=" * 60)
@@ -109,7 +114,7 @@ def run_pipeline(
         return None
     logger.info(f"Model Registry complete | artifacts saved to: {Path(model_registry_output_dir).resolve()}")
 
-    # ── Step 7 — Model Trainer ──────────────────────────────
+    # ── Step 8 — Model Trainer ──────────────────────────────
     logger.info("Step 8 — Model Trainer")
     mt_result = run_trainer(
         X_train=fe_result["X_train"],
@@ -127,6 +132,30 @@ def run_pipeline(
     best_model_name = mt_result.get("best_model", {}).get("model_name", "Unknown")
     logger.info(f"Model Trainer complete | best model: {best_model_name}")
 
+    # ── Step 9 — Hyperparameter Optimization (HPO) ────────────────────────
+    logger.info("Step 9 — Hyperparameter Optimization (HPO)")
+    hpo_result = run_hpo(
+        trainer_result=mt_result,
+        X_train=fe_result["X_train"],
+        X_test=fe_result["X_test"],
+        y_train=fe_result["y_train"],
+        y_test=fe_result["y_test"],
+        task_type=task_type,
+        registry_result=mr_result,
+        n_trials=hpo_n_trials,
+        top_n_models=hpo_top_n_models,
+        timeout_per_model=hpo_timeout_per_model,
+        output_dir=hpo_output_dir
+    )
+
+    if not hpo_result or not hpo_result.get("final_best_model"):
+        logger.error("Pipeline aborted — HPO failed")
+        return None
+
+    final_best_name = hpo_result["final_best_model"].get("model_name", "Unknown")
+    final_source = hpo_result["final_best_model"].get("source", "unknown").upper()
+    logger.info(f"HPO complete | Final Best Model: {final_best_name} ({final_source})")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
@@ -136,7 +165,8 @@ def run_pipeline(
         "preprocessor_result": preprocessor_result,
         "feature_engineering_result": fe_result,
         "model_registry_result": mr_result,
-        "model_trainer_result": mt_result
+        "model_trainer_result": mt_result,
+        "hpo_result": hpo_result
     }
 
 
@@ -150,5 +180,6 @@ if __name__ == "__main__":
         feature_engineer_output_dir="../artifacts/feature_engineer",
         model_registry_output_dir= "../artifacts/model_registry",
         model_trainer_output_dir= "../artifacts/model_trainer",
+        hpo_output_dir="../artifacts/hpo",
         api_key=os.getenv("OPENAI_API_KEY")
     )
