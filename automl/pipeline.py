@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
+from automl.evaluator import run_evaluator
 from automl.feature_engineer import run_feature_engineering
 from automl.hpo import run_hpo
 from automl.model_registry import run_model_registry
@@ -23,6 +24,7 @@ def run_pipeline(
     model_registry_output_dir: str = "artifacts/model_registry",
     model_trainer_output_dir: str = "artifacts/model_trainer",
     hpo_output_dir: str = "artifacts/hpo",
+    evaluator_output_dir: str = "artifacts/evaluator",
     hpo_n_trials: int = 50,
     hpo_top_n_models: int = 3,
     hpo_timeout_per_model: int = 600,
@@ -156,6 +158,34 @@ def run_pipeline(
     final_source = hpo_result["final_best_model"].get("source", "unknown").upper()
     logger.info(f"HPO complete | Final Best Model: {final_best_name} ({final_source})")
 
+    # ── Step 10 — Evaluator ─────────────────────────────────────────
+    logger.info("Step 10 — Running Model Evaluator")
+
+    # Extract feature names (fallback to index/range if not explicitly available)
+    if hasattr(fe_result["X_train"], "columns"):
+        feature_names = fe_result["X_train"].columns.tolist()
+    else:
+        feature_names = fe_result.get("feature_names", [f"feature_{i}" for i in range(fe_result["X_train"].shape[1])])
+
+    evaluator_result = run_evaluator(
+        final_best_model=hpo_result["final_best_model"],
+        X_train=fe_result["X_train"],
+        X_test=fe_result["X_test"],
+        y_train=fe_result["y_train"],
+        y_test=fe_result["y_test"],
+        task_type=task_type,
+        target_col=target_col,
+        feature_names=feature_names,
+        output_dir=evaluator_output_dir
+    )
+
+    if not evaluator_result:
+        logger.error("Pipeline aborted — Evaluation failed")
+        return None
+
+    logger.info(f"Evaluator complete | artifacts saved to: {Path(evaluator_output_dir).resolve()}")
+    logger.info(f"Evaluation Summary: {evaluator_result.get('evaluation_summary')}")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
@@ -166,7 +196,8 @@ def run_pipeline(
         "feature_engineering_result": fe_result,
         "model_registry_result": mr_result,
         "model_trainer_result": mt_result,
-        "hpo_result": hpo_result
+        "hpo_result": hpo_result,
+        "evaluator_result": evaluator_result,
     }
 
 
@@ -181,5 +212,6 @@ if __name__ == "__main__":
         model_registry_output_dir= "../artifacts/model_registry",
         model_trainer_output_dir= "../artifacts/model_trainer",
         hpo_output_dir="../artifacts/hpo",
+        evaluator_output_dir="../artifacts/evaluator",
         api_key=os.getenv("OPENAI_API_KEY")
     )
