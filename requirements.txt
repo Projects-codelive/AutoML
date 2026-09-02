@@ -14,3 +14,4 @@ statsmodels
 python-dotenv
 lightgbm
 optuna
+shap

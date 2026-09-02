@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
 from automl.evaluator import run_evaluator
+from automl.explainer import run_explainer
 from automl.feature_engineer import run_feature_engineering
 from automl.hpo import run_hpo
 from automl.model_registry import run_model_registry
@@ -25,6 +26,7 @@ def run_pipeline(
     model_trainer_output_dir: str = "artifacts/model_trainer",
     hpo_output_dir: str = "artifacts/hpo",
     evaluator_output_dir: str = "artifacts/evaluator",
+    explainer_output_dir: str = "artifacts/explainer",
     hpo_n_trials: int = 50,
     hpo_top_n_models: int = 3,
     hpo_timeout_per_model: int = 600,
@@ -186,6 +188,26 @@ def run_pipeline(
     logger.info(f"Evaluator complete | artifacts saved to: {Path(evaluator_output_dir).resolve()}")
     logger.info(f"Evaluation Summary: {evaluator_result.get('evaluation_summary')}")
 
+    # ── Step 11 — Explainer ─────────────────────────────────────────
+    logger.info("Step 11 — Running Model Explainer")
+
+    explainer_result = run_explainer(
+        final_best_model=hpo_result["final_best_model"],
+        X_train=fe_result["X_train"],
+        X_test=fe_result["X_test"],
+        y_train=fe_result["y_train"],
+        y_test=fe_result["y_test"],
+        task_type=task_type,
+        feature_names=feature_names,
+        evaluator_result=evaluator_result,
+        output_dir=explainer_output_dir
+    )
+
+    if explainer_result and not explainer_result.get("skipped"):
+        logger.info(f"Explainer complete | artifacts saved to: {Path(explainer_output_dir).resolve()}")
+    else:
+        logger.warning("Explainer step was skipped (e.g., unsupported model or SHAP missing).")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
@@ -198,6 +220,7 @@ def run_pipeline(
         "model_trainer_result": mt_result,
         "hpo_result": hpo_result,
         "evaluator_result": evaluator_result,
+        "explainer_result": explainer_result,
     }
 
 
@@ -213,5 +236,6 @@ if __name__ == "__main__":
         model_trainer_output_dir= "../artifacts/model_trainer",
         hpo_output_dir="../artifacts/hpo",
         evaluator_output_dir="../artifacts/evaluator",
+        explainer_output_dir="../artifacts/explainer",
         api_key=os.getenv("OPENAI_API_KEY")
     )
