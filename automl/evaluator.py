@@ -60,19 +60,26 @@ def _validate_evaluator_inputs(final_best_model, X_train, X_test, y_train, y_tes
             raise ValueError("Length of clustering labels must match the length of X_train.")
     return None
 
-def _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col):
+def _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col, X_train=None):
     warnings_list = []
     def log_and_store_warning(msg: str):
         logging.warning(msg)
         warnings_list.append(msg)
     y_test_arr = np.array(y_test)
     y_pred_arr = np.array(y_pred)
-    # Primary Metrix
+    # Primary Metrics
     mae = float(mean_absolute_error(y_test_arr, y_pred_arr))
     mse = float(mean_squared_error(y_test_arr, y_pred_arr))
     rmse = float(root_mean_squared_error(y_test_arr, y_pred_arr))
     r2 = float(r2_score(y_test_arr, y_pred_arr))
-    #Adjusted R2
+
+    # Intuitive Accuracy: percentage of variance explained (bounded [0, 100]) & tolerance accuracy
+    accuracy_score_pct = max(0.0, min(100.0, float(r2 * 100.0)))
+    rel_errors = np.abs((y_test_arr - y_pred_arr) / np.maximum(np.abs(y_test_arr), 1e-8))
+    accuracy_10pct = float(np.mean(rel_errors <= 0.10) * 100.0)
+    accuracy_20pct = float(np.mean(rel_errors <= 0.20) * 100.0)
+
+    # Adjusted R2
     n = len(y_test_arr)
     p = X_test.shape[1]
     adj_r2_denom = n - p - 1
@@ -101,7 +108,13 @@ def _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col):
     if abs(residual_skew) > 1:
         log_and_store_warning("Heteroscedastic errors detected — residual skew is far from 0.")
     # Overfitting Check
-    train_r2_raw = cross_val_score(model, X_test, y_test, cv=3, scoring='r2').mean()
+    train_r2_raw = r2
+    if y_train is not None and X_train is not None and hasattr(model, "predict"):
+        try:
+            y_train_pred = model.predict(X_train)
+            train_r2_raw = float(r2_score(y_train, y_train_pred))
+        except Exception:
+            pass
     overfitting_gap = train_r2_raw - r2
     if overfitting_gap > 0.1:
         log_and_store_warning("Possible overfitting detected — train R² significantly higher than test R²")
@@ -110,6 +123,10 @@ def _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col):
     if rmse > float(np.std(y_test_arr)):
         log_and_store_warning("RMSE exceeds target standard deviation — model has low predictive power")
     return {
+        "accuracy": accuracy_score_pct,
+        "accuracy_score_pct": accuracy_score_pct,
+        "accuracy_10pct": accuracy_10pct,
+        "accuracy_20pct": accuracy_20pct,
         "mae": mae,
         "mse": mse,
         "rmse": rmse,
@@ -126,7 +143,7 @@ def _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col):
     }
 
 
-def _evaluate_classification(y_test, y_pred, y_proba, model, X_test):
+def _evaluate_classification(y_test, y_pred, y_proba, model, X_test, X_train=None, y_train=None):
     warnings_list = []
     def log_and_store_warning(msg: str):
         logging.warning(msg)
@@ -174,8 +191,14 @@ def _evaluate_classification(y_test, y_pred, y_proba, model, X_test):
         if key not in ['accuracy', 'macro avg', 'weighted avg']
     }
 
-    cv_acc_raw = cross_val_score(model, X_test, y_test_arr, cv=3, scoring='accuracy').mean()
-    overfitting_gap = float(cv_acc_raw - accuracy)
+    train_acc = accuracy
+    if y_train is not None and X_train is not None and hasattr(model, "predict"):
+        try:
+            train_pred = model.predict(X_train)
+            train_acc = float(accuracy_score(y_train, train_pred))
+        except Exception:
+            pass
+    overfitting_gap = float(train_acc - accuracy)
     if overfitting_gap > 0.1:
         log_and_store_warning("Possible overfitting detected — train accuracy significantly higher than test accuracy")
     return {
@@ -1007,13 +1030,13 @@ def run_evaluator(final_best_model: dict, X_train, X_test, y_train, y_test,
     # 2-4 & 5-7. Evaluate and Plot based on task type
     if task == 'regression':
         y_pred = model.predict(X_test)
-        metrics = _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col)
+        metrics = _evaluate_regression(y_test, y_pred, y_train, model, X_test, target_col, X_train=X_train)
         plot_paths = _plot_regression_diagnostics(y_test, y_pred, target_col, output_dir)
 
     elif task == 'classification':
         y_pred = model.predict(X_test)
         y_proba = model.predict_proba(X_test) if hasattr(model, 'predict_proba') else None
-        metrics = _evaluate_classification(y_test, y_pred, y_proba, model, X_test)
+        metrics = _evaluate_classification(y_test, y_pred, y_proba, model, X_test, X_train=X_train, y_train=y_train)
         classes = getattr(model, 'classes_', np.unique(y_test))
         plot_paths = _plot_classification_diagnostics(y_test, y_pred, y_proba, classes, output_dir)
 

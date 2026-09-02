@@ -60,10 +60,18 @@ def determine_type_of_PS(data, target_col=None):
     if is_text or is_category or is_bool:
         return "Classification"
     elif pd.api.types.is_numeric_dtype(target_data):
-        if uniques_values < 15 and (total_rows > uniques_values * 2):
-            return "Clustering"
-        else:
-            return "Regression"
+        if uniques_values == 2:
+            return "Classification"
+        # Discrete integer class codes (0, 1, 2, ...) with multiple samples per class
+        if (
+            pd.api.types.is_integer_dtype(target_data)
+            and uniques_values <= 10
+            and total_rows >= 30
+            and target_data.min() in [0, 1]
+            and target_data.max() <= 20
+        ):
+            return "Classification"
+        return "Regression"
     else:
         return "Unknown"
 

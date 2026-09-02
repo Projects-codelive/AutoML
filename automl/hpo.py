@@ -10,6 +10,8 @@ import joblib
 import numpy as np
 import optuna
 import pandas as pd
+from scipy.stats import skew
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import silhouette_score
 from sklearn.model_selection import cross_val_score
@@ -213,6 +215,13 @@ def _build_optuna_objective(model_key, task_type, X_train, y_train, cv, registry
 
         # 5. Get fresh model instance with trial params
         model = get_model_instance(task_type, model_key, params)
+        if task_type == "Regression" and y_train is not None:
+            if (y_train > 0).all() and skew(y_train) > 0.75:
+                model = TransformedTargetRegressor(
+                    regressor=model,
+                    func=np.log1p,
+                    inverse_func=np.expm1
+                )
 
         # 6. Score — branch on scorer_type
         try:
@@ -472,6 +481,13 @@ def _retrain_with_best_params(
     try:
         # 1. Fresh instance with HPO params
         model = get_model_instance(task_type, model_key, best_params)
+        if t_type == "regression" and y_train is not None:
+            if (y_train > 0).all() and skew(y_train) > 0.75:
+                model = TransformedTargetRegressor(
+                    regressor=model,
+                    func=np.log1p,
+                    inverse_func=np.expm1
+                )
 
         # 2. Restore n_jobs=-1 — we're no longer inside Optuna's sequential loop
         if hasattr(model, "n_jobs"):
@@ -985,22 +1001,26 @@ def get_final_best_model(
             final_score   = hpo_score
 
     model_name = winner_entry.get("model_name", winner_entry.get("model_key", "Unknown"))
+    score_str = f"{final_score:.5f}" if final_score is not None else "N/A"
+    base_score_str = f"{baseline_score:.5f}" if baseline_score is not None else "N/A"
+    
     if winner_source == "hpo":
         logger.info(
             f"Final best model: {model_name} (HPO) | "
-            f"score: {final_score:.5f} (improved from baseline: {baseline_score:.5f})"
+            f"score: {score_str} (improved from baseline: {base_score_str})"
         )
     else:
         if best_hpo is not None:
             hpo_score = best_hpo.get("hpo_best_score", 0.0)
+            hpo_str = f"{hpo_score:.5f}" if hpo_score is not None else "N/A"
             logger.info(
                 f"Final best model: {model_name} (BASELINE) | "
-                f"score: {final_score:.5f} (HPO did not improve — best HPO: {hpo_score:.5f})"
+                f"score: {score_str} (HPO did not improve — best HPO: {hpo_str})"
             )
         else:
             logger.info(
                 f"Final best model: {model_name} (BASELINE) | "
-                f"score: {final_score:.5f} (all HPO trials failed or skipped)"
+                f"score: {score_str} (all HPO trials failed or skipped)"
             )
 
     result              = dict(winner_entry)

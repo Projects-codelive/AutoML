@@ -393,51 +393,123 @@ def target_column_analysis(df: pd.DataFrame, task_type: str, target_col: str, sa
         logger.error(f"Unknown task_type: {task_type} — skipping target analysis")
         return None
 
-# Step 8 — Correlation Analysis (Numerical)
+# Step 8 — Correlation Analysis (Comprehensive Numerical + Categorical)
 def correlation_Analysis(df: pd.DataFrame, task_type: str = None, target_col: str = None, threshold: float = 0.85, save_path: str = None):
-    numerical_column = numerical_col = df.select_dtypes(include=["number", "float", "int64"]).columns.tolist()
-    if len(numerical_column) < 2:
-        logger.error("Not enough numerical columns to compute correlations")
-        return None
-    corr_matrix = df[numerical_col].corr(method="pearson")
-    # ── Heatmap ──────────────────────────────────────────────────────────
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0)
-    plt.title("Pearson Correlation Matrix")
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path)
-    # Multicollineraity
+    numerical_col = df.select_dtypes(include=["number", "float", "int64"]).columns.tolist()
+    categorical_col = df.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+    
     multicollinear_pairs = []
-    for i in range(len(numerical_column)):
-        for j in range(i+1, len(numerical_column)):
-            col_a, col_b = numerical_column[i], numerical_column[j]
-            corr = corr_matrix.loc[col_a, col_b]
-            if abs(corr) > threshold:
-                multicollinear_pairs.append({
-                    "col_a": col_a,
-                    "col_b": col_b,
-                    "corr": corr
-                })
-    if multicollinear_pairs:
-        logger.info(f"Total Multicollinear pairs: {len(multicollinear_pairs)}")
-        for pair in multicollinear_pairs:
-            logger.info(f"Correlation between {pair['col_a']} and {pair['col_b']} is {pair['corr']:.3f}")
-    # ── Target correlation ranking (supervised tasks only) ──────────────────
-    target_corr_ranked = None
-    if task_type in ("Regression", "Classification") and target_col is not None:
-        if target_col not in numerical_col:
-            logger.warning(f"Target column '{target_col}' is not numeric — skipping target correlation ranking")
+    corr_matrix = None
+    target_corr_ranked = {}
+
+    # ── 1. Numerical Pearson & Multicollinearity ───────────────────────────
+    if len(numerical_col) >= 2:
+        corr_matrix = df[numerical_col].corr(method="pearson")
+        # Multicollinearity
+        for i in range(len(numerical_col)):
+            for j in range(i+1, len(numerical_col)):
+                col_a, col_b = numerical_col[i], numerical_col[j]
+                val = corr_matrix.loc[col_a, col_b]
+                if pd.notna(val) and abs(val) > threshold:
+                    multicollinear_pairs.append({
+                        "col_a": col_a,
+                        "col_b": col_b,
+                        "corr": round(float(val), 4)
+                    })
+        if multicollinear_pairs:
+            logger.info(f"Total Multicollinear pairs: {len(multicollinear_pairs)}")
+            for pair in multicollinear_pairs:
+                logger.info(f"Correlation between {pair['col_a']} and {pair['col_b']} is {pair['corr']:.3f}")
+
+        # Heatmap plot
+        plt.figure(figsize=(max(8, len(numerical_col)), max(6, int(len(numerical_col)*0.8))))
+        sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0)
+        plt.title("Pearson Correlation Matrix (Numerical)")
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    # ── 2. Target Correlation / Association Ranking ────────────────────────
+    if task_type in ("Regression", "Classification") and target_col is not None and target_col in df.columns:
+        target_series = df[target_col].dropna()
+        valid_idx = target_series.index
+
+        # A. If target is numeric (Regression)
+        if pd.api.types.is_numeric_dtype(df[target_col]):
+            # Numerical features -> Pearson correlation
+            for col in numerical_col:
+                if col == target_col:
+                    continue
+                s = df.loc[valid_idx, col].dropna()
+                common_idx = s.index.intersection(valid_idx)
+                if len(common_idx) > 5:
+                    r = df.loc[common_idx, col].corr(df.loc[common_idx, target_col])
+                    if pd.notna(r):
+                        target_corr_ranked[col] = round(float(r), 4)
+
+            # Categorical features -> Correlation Ratio (Eta)
+            for col in categorical_col:
+                if col == target_col:
+                    continue
+                sub = df.loc[valid_idx, [col, target_col]].dropna()
+                if sub[col].nunique() > 1 and len(sub) > 10:
+                    try:
+                        # Correlation ratio eta = sqrt(SS_between / SS_total)
+                        groups = [group[target_col].values for _, group in sub.groupby(col) if len(group) > 0]
+                        if len(groups) > 1:
+                            grand_mean = sub[target_col].mean()
+                            ss_total = ((sub[target_col] - grand_mean) ** 2).sum()
+                            ss_between = sum(len(g) * ((np.mean(g) - grand_mean) ** 2) for g in groups)
+                            if ss_total > 0:
+                                eta = np.sqrt(max(0.0, min(1.0, ss_between / ss_total)))
+                                target_corr_ranked[col] = round(float(eta), 4)
+                    except Exception as e:
+                        logger.debug(f"Could not compute correlation ratio for {col}: {e}")
+
+        # B. If target is categorical (Classification)
         else:
-            target_corr = corr_matrix[target_col].drop(index=target_col)
-            target_corr_ranked = target_corr.reindex(
-                target_corr.abs().sort_values(ascending=False).index
-            )
-            logger.info(f"\nFeature correlation with target '{target_col}' (ranked by |corr|):")
-            logger.info(target_corr_ranked.round(3))
+            # Categorical vs Categorical -> Cramér's V
+            # Categorical vs Numerical -> Correlation Ratio (Eta)
+            for col in numerical_col:
+                sub = df.loc[valid_idx, [col, target_col]].dropna()
+                if sub[target_col].nunique() > 1 and len(sub) > 10:
+                    try:
+                        groups = [group[col].values for _, group in sub.groupby(target_col) if len(group) > 0]
+                        if len(groups) > 1:
+                            grand_mean = sub[col].mean()
+                            ss_total = ((sub[col] - grand_mean) ** 2).sum()
+                            ss_between = sum(len(g) * ((np.mean(g) - grand_mean) ** 2) for g in groups)
+                            if ss_total > 0:
+                                eta = np.sqrt(max(0.0, min(1.0, ss_between / ss_total)))
+                                target_corr_ranked[col] = round(float(eta), 4)
+                    except Exception as e:
+                        logger.debug(f"Could not compute correlation ratio for {col}: {e}")
+
+            for col in categorical_col:
+                if col == target_col:
+                    continue
+                sub = df.loc[valid_idx, [col, target_col]].dropna()
+                if sub[col].nunique() > 1 and len(sub) > 10:
+                    try:
+                        confusion_mat = pd.crosstab(sub[col], sub[target_col])
+                        from scipy.stats import chi2_contingency
+                        chi2 = chi2_contingency(confusion_mat)[0]
+                        n = confusion_mat.sum().sum()
+                        min_dim = min(confusion_mat.shape) - 1
+                        if min_dim > 0 and n > 0:
+                            cramers_v = np.sqrt(chi2 / (n * min_dim))
+                            target_corr_ranked[col] = round(float(cramers_v), 4)
+                    except Exception as e:
+                        logger.debug(f"Could not compute Cramér's V for {col}: {e}")
+
+        # Sort by absolute strength
+        target_corr_ranked = dict(sorted(target_corr_ranked.items(), key=lambda item: abs(item[1]), reverse=True))
+        logger.info(f"\nFeature association with target '{target_col}' (ranked by strength):")
+        for k, v in list(target_corr_ranked.items())[:15]:
+            logger.info(f" - {k}: {v}")
 
     return {
-        # "corr_matrix": corr_matrix,
         "multicollinear_pairs": multicollinear_pairs,
         "target_corr_ranked": target_corr_ranked
     }

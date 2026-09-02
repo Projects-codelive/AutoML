@@ -44,7 +44,12 @@ def split_data(df: pd.DataFrame, target_col: str = None, task_type: str = None, 
         if task_type == "Regression":
             x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, random_state=random_state)
         else:
-            x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, random_state=random_state, stratify=y)
+            class_counts = y.value_counts()
+            if (class_counts < 2).any() or len(y) < 10:
+                logger.info("Some classes have <2 samples. Splitting without stratification.")
+                x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, random_state=random_state)
+            else:
+                x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, random_state=random_state, stratify=y)
     logger.info("--- Train-Test Split Completed ---")
     logger.info(f"X_train shape: {x_train.shape} | X_test shape: {x_test.shape}")
     if y_train is not None:
@@ -123,23 +128,160 @@ def impute_missing_values(x_train, x_test, eda_summary):
             fitted_imputers[col] = imputer
     return x_train, x_test, fitted_imputers
 
-# Step 4 — Outlier Treatment (IQR Capping)
-def cap_outliers(x_train, x_test, eda_summary):
-    outlier_report = eda_summary.get("outlier_report", {})
+# Step 3.5 — Domain & Spec Feature Extraction (e.g., Engine Specs, Normalized Categories)
+def extract_domain_features(x_train: pd.DataFrame, x_test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list]:
+    x_train = x_train.copy()
+    x_test = x_test.copy()
+    extracted_cols = []
+
+    # 1. Engine Specs Extraction
+    if "engine" in x_train.columns:
+        logger.info("Extracting structured specifications (HP, Displacement, Cylinders, Tier) from 'engine' column...")
+        def _parse_engine(val):
+            if pd.isna(val) or str(val).strip() in ["–", "", "not supported", "nan", "None"]:
+                return np.nan, np.nan, np.nan
+            val_str = str(val).upper()
+            # Horsepower
+            hp_m = re.search(r"(\d+\.?\d*)\s*HP", val_str)
+            hp = float(hp_m.group(1)) if hp_m else np.nan
+            # Displacement
+            disp_m = re.search(r"(\d+\.?\d*)\s*(?:L|LITER)", val_str)
+            disp = float(disp_m.group(1)) if disp_m else np.nan
+            # Cylinders
+            cyl_m = re.search(r"(\d+)\s*CYLINDER|V(\d+)|I(\d+)|H(\d+)|W(\d+)|(\d+)\s*CYL", val_str)
+            cyl = None
+            if cyl_m:
+                for g in cyl_m.groups():
+                    if g is not None:
+                        cyl = float(g)
+                        break
+            return hp, disp, cyl
+
+        train_specs = x_train["engine"].apply(_parse_engine).tolist()
+        test_specs = x_test["engine"].apply(_parse_engine).tolist()
+
+        train_spec_df = pd.DataFrame(train_specs, columns=["hp", "displacement", "cylinders"], index=x_train.index)
+        test_spec_df = pd.DataFrame(test_specs, columns=["hp", "displacement", "cylinders"], index=x_test.index)
+
+        # Impute missing parsed values with train median
+        for c in ["hp", "displacement", "cylinders"]:
+            med = train_spec_df[c].median()
+            if pd.isna(med):
+                med = 0.0
+            train_spec_df[c] = train_spec_df[c].fillna(med)
+            test_spec_df[c] = test_spec_df[c].fillna(med)
+
+        # Engine Tier ordinal feature
+        def _get_tier(row):
+            hp = row["hp"]
+            cyl = row["cylinders"]
+            if hp > 380 or cyl >= 8:
+                return 3  # High Performance
+            elif hp < 200 or (cyl is not None and cyl <= 4):
+                return 1  # Economy
+            return 2      # Standard
+
+        train_spec_df["engine_tier"] = train_spec_df.apply(_get_tier, axis=1)
+        test_spec_df["engine_tier"] = test_spec_df.apply(_get_tier, axis=1)
+
+        x_train = x_train.drop(columns=["engine"])
+        x_test = x_test.drop(columns=["engine"])
+
+        x_train = pd.concat([x_train, train_spec_df], axis=1)
+        x_test = pd.concat([x_test, test_spec_df], axis=1)
+        extracted_cols.extend(["hp", "displacement", "cylinders", "engine_tier"])
+        logger.info(f"Engine specs successfully extracted: {['hp', 'displacement', 'cylinders', 'engine_tier']}")
+
+    # 2. Rule-based Categorical Simplification (for columns with high variance/messy labels when AI grouping is skipped)
+    if "accident" in x_train.columns:
+        acc_map = {"none reported": 0, "at least 1 accident or damage reported": 1, "0": 0, "1": 1}
+        x_train["accident"] = x_train["accident"].astype(str).str.lower().str.strip().map(acc_map).fillna(0).astype(int)
+        x_test["accident"] = x_test["accident"].astype(str).str.lower().str.strip().map(acc_map).fillna(0).astype(int)
+
+    if "clean_title" in x_train.columns:
+        title_map = {"yes": 1, "1": 1, "true": 1, "no": 0, "0": 0, "false": 0}
+        x_train["clean_title"] = x_train["clean_title"].astype(str).str.lower().str.strip().map(title_map).fillna(0).astype(int)
+        x_test["clean_title"] = x_test["clean_title"].astype(str).str.lower().str.strip().map(title_map).fillna(0).astype(int)
+
+    # Transmission simplification
+    if "transmission" in x_train.columns and x_train["transmission"].dtype == "object":
+        def _simplify_trans(trans):
+            if pd.isna(trans) or str(trans).strip() in ["–", "2", "F", "", "nan", "None"]:
+                return "Automatic"
+            t = str(trans).lower().strip()
+            if any(k in t for k in ["dual shift", "manual mode", "cmdshft", "dual-clutch", "pdk", "dct", "at/mt", "both"]):
+                return "Both"
+            if any(k in t for k in ["m/t", "manual", "6-speed manual", "7-speed manual", "8-speed manual"]):
+                return "Manual"
+            return "Automatic"
+        x_train["transmission"] = x_train["transmission"].apply(_simplify_trans)
+        x_test["transmission"] = x_test["transmission"].apply(_simplify_trans)
+
+    # Color simplification
+    for col in ["ext_col", "int_col"]:
+        if col in x_train.columns and x_train[col].dtype == "object":
+            def _simplify_color(color):
+                if pd.isna(color) or str(color).strip() in ["–", "c / c", "Custom Color", "Metallic", "", "nan", "None"]:
+                    return "Other"
+                c = str(color).lower().strip(". ")
+                if any(w in c for w in ["black", "ebony", "noir", "obsidian", "night", "nero", "onyx", "midnight", "raven", "blk", "beluga"]):
+                    return "Black"
+                if any(w in c for w in ["white", "bianco", "alpine", "snow", "ivory", "glacier", "pearl", "frost", "arctic", "linen", "cream"]):
+                    return "White"
+                if any(w in c for w in ["silver", "gray", "grey", "metallic", "graphite", "platinum", "charcoal", "slate", "steel", "titanium", "ash", "grigio", "pewter"]):
+                    return "Silver/Gray"
+                if any(w in c for w in ["blue", "blu", "navy", "aqua", "cyan", "nautical", "horizon", "sky"]):
+                    return "Blue"
+                if any(w in c for w in ["red", "rosso", "maroon", "burgundy", "crimson", "scarlet", "ruby", "cherry", "garnet", "magma", "rioja"]):
+                    return "Red"
+                if any(w in c for w in ["brown", "mocha", "coffee", "chocolate", "bronze", "copper", "saddle", "caramel", "cocoa", "walnut", "espresso"]):
+                    return "Brown"
+                if any(w in c for w in ["beige", "tan", "sand", "sandstone", "wheat", "champagne", "parchment", "camel", "almond", "oyster"]):
+                    return "Beige/Tan"
+                if any(w in c for w in ["green", "verde", "emerald", "forest", "moss", "jungle", "olive"]):
+                    return "Green"
+                if any(w in c for w in ["orange", "mango", "arancio", "sunset"]):
+                    return "Orange"
+                if any(w in c for w in ["yellow", "gold", "hellayella"]):
+                    return "Yellow/Gold"
+                return "Other"
+            x_train[col] = x_train[col].apply(_simplify_color)
+            x_test[col] = x_test[col].apply(_simplify_color)
+
+    return x_train, x_test, extracted_cols
+
+# Step 4 — Outlier Treatment (IQR Capping on Features AND Target)
+def cap_outliers(x_train, x_test, y_train=None, y_test=None, eda_summary=None, task_type="Regression"):
+    outlier_report = eda_summary.get("outlier_report", {}) if eda_summary else {}
     capping_bound = {}
-    col = list(outlier_report.keys())
+    
+    # Feature outlier capping
     for col, stats in outlier_report.items():
-        if col in x_train.columns and stats.get("percentage", 0) > 0:
+        if col in x_train.columns and stats.get("percentage", 0) > 0 and pd.api.types.is_numeric_dtype(x_train[col]):
             q1, q3 = x_train[col].quantile(0.25), x_train[col].quantile(0.75)
             iqr = q3 - q1
             lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-            affected_rows = ((x_train[col] < lower) | (x_train[col] > upper)).sum()
-            logger.info(f"Capped '{col}' - bounds: ({lower:.2f}, {upper:.2f}) | Affected train rows: {affected_rows}")
-            capping_bound[col] = (lower, upper)
+            affected_rows = int(((x_train[col] < lower) | (x_train[col] > upper)).sum())
+            logger.info(f"Capped feature '{col}' - bounds: ({lower:.2f}, {upper:.2f}) | Affected train rows: {affected_rows}")
+            capping_bound[col] = (float(lower), float(upper))
             x_train[col] = x_train[col].clip(lower=lower, upper=upper)
             if col in x_test.columns:
                 x_test[col] = x_test[col].clip(lower=lower, upper=upper)
-    return x_train, x_test, capping_bound
+
+    # Target outlier treatment (Only clip extreme impossible outliers / typos, preserving valid high-end distributions)
+    if task_type == "Regression" and y_train is not None:
+        target_col = eda_summary.get("target_col", "target") if eda_summary else "target"
+        y_min = float(y_train.min())
+        # If target has extreme non-positive values when it's strictly positive, or extreme 99.9th percentile typos
+        if (y_train > 0).all():
+            y_upper = float(y_train.quantile(0.999))
+            y_lower = float(y_train.quantile(0.001))
+            capping_bound[f"TARGET_{target_col}"] = (y_lower, y_upper)
+            y_train = y_train.clip(lower=y_lower, upper=y_upper)
+            if y_test is not None:
+                y_test = y_test.clip(lower=y_lower, upper=y_upper)
+
+    return x_train, x_test, y_train, y_test, capping_bound
 
 # AI Grouping
 def ai_group_column(series: pd.Series, col_name: str, client: OpenAI, min_unique: int = 7, max_unique: int = 300) -> dict | None:
@@ -308,7 +450,7 @@ def apply_ai_grouping(X_train: pd.DataFrame, X_test: pd.DataFrame,
 def target_encode_column(X_train: pd.DataFrame, X_test: pd.DataFrame,
                          col: str, y_train: pd.Series,
                          n_splits: int = 5,
-                         smoothing: float = 10.0) -> tuple:
+                         smoothing: float = 1.0) -> tuple:
     """
     Out-of-fold target encoding — no leakage.
     Each row in X_train is encoded using target stats from OTHER folds only.
@@ -571,9 +713,14 @@ def remove_high_vif_features(x_train, x_test, threshold=10.0):
             x_train = x_train.drop(columns=[max_col])
             x_test = x_test.drop(columns=[max_col])
             continue # Restart the loop
-        # 4. Standard threshold check
+        # 4. Standard threshold check with core feature protection
+        protected = {"hp", "displacement", "cylinders", "engine_tier", "model_year", "milage", "mileage", "year"}
         if max_vif > threshold:
-            print(f"Dropping '{max_col}' | VIF Score: {max_vif:.2f}")
+            if max_col in protected:
+                # Do not drop primary domain specs; remove from calculation list and continue checking other cols
+                numerical_col.remove(max_col)
+                continue
+            logger.info(f"Dropping '{max_col}' | VIF Score: {max_vif:.2f}")
             numerical_col.remove(max_col)
             dropped_features.append(max_col)
 
@@ -581,7 +728,7 @@ def remove_high_vif_features(x_train, x_test, threshold=10.0):
             x_test = x_test.drop(columns=[max_col])
         else:
             break
-    print(f"\nTotal features dropped due to multicollinearity: {len(dropped_features)}")
+    logger.info(f"Total features dropped due to multicollinearity: {len(dropped_features)}")
     return x_train, x_test, dropped_features
 
 # Step 10 — Save Preprocessor Artifacts
@@ -689,6 +836,10 @@ def run_preprocessor(
     logger.info("STEP 3 — Imputing Missing Values")
     x_train, x_test, imputers = impute_missing_values(x_train, x_test, eda_summary)
 
+    # ── Step 3.5 — Domain & Spec Feature Extraction ───────────────
+    logger.info("STEP 3.5 — Extracting Domain & Spec Features")
+    x_train, x_test, extracted_domain_cols = extract_domain_features(x_train, x_test)
+
     # ── AI Grouping (between Step 3 and Step 5) ───────────────────
     logger.info("AI GROUPING — Semantic Category Reduction")
     if api_key:
@@ -700,8 +851,10 @@ def run_preprocessor(
         logger.warning("No API key — skipping AI grouping")
 
     # ── Step 4 — Cap outliers ─────────────────────────────────────
-    logger.info("STEP 4 — Capping Outliers")
-    x_train, x_test, outlier_bounds = cap_outliers(x_train, x_test, eda_summary)
+    logger.info("STEP 4 — Capping Outliers (Features & Target)")
+    x_train, x_test, y_train, y_test, outlier_bounds = cap_outliers(
+        x_train, x_test, y_train, y_test, eda_summary, task_type=task_type
+    )
 
     # ── Step 5 — Encode categoricals ──────────────────────────────
     logger.info("STEP 5 — Encoding Categorical Columns")

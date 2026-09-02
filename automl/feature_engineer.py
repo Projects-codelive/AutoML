@@ -14,16 +14,21 @@ logger = get_logger("feature_engineer")
 
 
 # Step 1
-def generate_polynomial_features(x_train, x_test, eda_summary, degree=2,max_cols=10):
-    candidates = eda_summary.get("column_types", {}).get("numerical_continuous", [])
-    candidates = [col for col in candidates if col in x_train.columns]
+def generate_polynomial_features(x_train, x_test, eda_summary, degree=2, max_cols=4):
+    eda_candidates = eda_summary.get("column_types", {}).get("numerical_continuous", []) if eda_summary else []
+    # Identify continuous columns in x_train (either from EDA or having >15 unique numeric values)
+    numeric_cols = x_train.select_dtypes(include=[np.number]).columns.tolist()
+    candidates = [
+        col for col in numeric_cols
+        if (col in eda_candidates or x_train[col].nunique() > 15) and not col.endswith(("_encoded", "_id", "_tier"))
+    ]
     # Check minimum requirements
     if len(candidates) < 2:
         logger.info(f"Skipping PolynomialFeatures: Found {len(candidates)} valid continuous columns (need at least 2).")
         return x_train, x_test, None
     variances = x_train[candidates].var()
     top_cols = variances.sort_values(ascending=False).head(max_cols).index.tolist()
-    logger.info(f"Generating polynomial features (degree={degree}) for {len(top_cols)} high-variance continuous columns...")
+    logger.info(f"Generating polynomial features (degree={degree}) for {len(top_cols)} high-variance continuous columns: {top_cols}...")
     poly = PolynomialFeatures(degree=degree, interaction_only=False, include_bias=False)
     # fit on x_train and transform on x_test
     x_train_poly_arrr = poly.fit_transform(x_train[top_cols])
@@ -37,7 +42,7 @@ def generate_polynomial_features(x_train, x_test, eda_summary, degree=2,max_cols
     x_test_dropped = x_test.drop(columns=top_cols)
     x_train_final = pd.concat([x_train_dropped, x_train_poly_df], axis=1)
     x_test_final = pd.concat([x_test_dropped, x_test_poly_df], axis=1)
-    new_cols_count = len(new_feature_names) - len(top_cols) # subtract the original columns to get the net *new* count
+    new_cols_count = len(new_feature_names) - len(top_cols)
     logger.info(f"Successfully created {new_cols_count} new polynomial/interaction features.")
     logger.info(f"Old X_train shape: {x_train.shape} | New X_train shape: {x_train_final.shape}")
     return x_train_final, x_test_final, poly
@@ -151,10 +156,11 @@ RULES:
 3. Each feature must be derivable using basic math: +, -, *, /, log, ratio, difference, or a conditional.
 4. Maximum {max_features} features total. Fewer is better — only suggest if genuinely useful.
 5. If the dataset does not benefit from derived features (e.g. already clean tabular data with clear independent columns), return an empty list.
-6. Never combine a column with itself.
-7. The formula must be executable as a pandas expression using column names.
-8. For classification/regression: prioritize features that likely correlate with the target.
-9. For clustering: prioritize features that capture meaningful group differences.
+6. Never combine a column with itself (NO powers or squares like col**2; polynomial features are generated separately).
+7. Do NOT generate simple pairwise multiplications (e.g. col_a * col_b) as polynomial interactions already handle them. Prioritize ratios (e.g. col_a / (col_b + 1e-8)), per-unit metrics, or differences.
+8. The formula must be executable as a pandas expression using column names.
+9. For classification/regression: prioritize features that likely correlate with the target.
+10. For clustering: prioritize features that capture meaningful group differences.
 
 RESPONSE FORMAT — return ONLY a valid JSON object, no markdown, no explanation:
 
@@ -312,7 +318,8 @@ def generate_aggregate_features(x_train, x_test, eda_summary, task_type):
         return x_train,x_test,[]
     new_col_names = []
     for cat_col in categorial_col:
-        if x_train[cat_col].nunique() > 30:
+        # Skip binary indicators or very high cardinality columns
+        if x_train[cat_col].nunique() <= 2 or x_train[cat_col].nunique() > 30:
             continue
         for num_col in numerical_cont:
             logger.info(f"Creating aggregate features for: {cat_col} -> {num_col}")
@@ -338,6 +345,56 @@ def generate_aggregate_features(x_train, x_test, eda_summary, task_type):
     logger.info(f"Successfully created {len(new_col_names)} aggregate features.")
     return x_train, x_test, new_col_names
 
+
+# Step 3b — drop_redundant_features
+def drop_redundant_features(x_train, x_test, threshold=0.95):
+    """
+    Identifies and removes redundant features that have a pairwise correlation
+    >= threshold (default 0.95) with another feature.
+    Prioritizes keeping original/base features over derived polynomial/interaction ones.
+    """
+    if x_train.shape[1] <= 1:
+        return x_train, x_test, []
+
+    corr_matrix = x_train.corr().abs()
+    to_drop = set()
+    cols = x_train.columns.tolist()
+
+    for i in range(len(cols)):
+        col_i = cols[i]
+        if col_i in to_drop:
+            continue
+        for j in range(i + 1, len(cols)):
+            col_j = cols[j]
+            if col_j in to_drop:
+                continue
+
+            corr_val = corr_matrix.loc[col_i, col_j]
+            if not np.isnan(corr_val) and corr_val >= threshold:
+                is_i_derived = any(sym in col_i for sym in ['^', ' ', '_squared', '_interaction', '_count', '_mean', '_std', '_min', '_max', '_ratio'])
+                is_j_derived = any(sym in col_j for sym in ['^', ' ', '_squared', '_interaction', '_count', '_mean', '_std', '_min', '_max', '_ratio'])
+
+                if is_j_derived and not is_i_derived:
+                    drop_target = col_j
+                elif is_i_derived and not is_j_derived:
+                    drop_target = col_i
+                else:
+                    drop_target = col_j if len(col_j) >= len(col_i) else col_i
+
+                partner = col_i if drop_target == col_j else col_j
+                logger.info(f"Redundancy filter: Dropping '{drop_target}' (correlated r={corr_val:.4f} with '{partner}')")
+                to_drop.add(drop_target)
+                if drop_target == col_i:
+                    break
+
+    dropped_list = list(to_drop)
+    if dropped_list:
+        x_train_clean = x_train.drop(columns=dropped_list)
+        x_test_clean = x_test.drop(columns=[c for c in dropped_list if c in x_test.columns])
+        logger.info(f"Successfully dropped {len(dropped_list)} redundant/collinear features: {dropped_list}")
+        return x_train_clean, x_test_clean, dropped_list
+
+    return x_train, x_test, []
 
 
 # Step 4 — select_features_variance
@@ -412,11 +469,14 @@ def select_features_univariate(x_train, x_test, y_train, task_type, k="all"):
 
 
 # Step 6 - select_features_model_based
-def select_features_model_based(x_train, x_test, y_train, task_type, threshold='median'):
+def select_features_model_based(x_train, x_test, y_train, task_type, threshold='0.01*mean'):
     if task_type == "Clustering":
         return x_train, x_test, list(x_train.columns)
 
-    # FIX 1: ExtraTrees (Plural)
+    if x_train.shape[1] <= 10:
+        logger.info(f"Dataset has only {x_train.shape[1]} features — skipping model-based pruning to retain all predictors.")
+        return x_train, x_test, list(x_train.columns)
+
     if task_type == "Regression":
         estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=-1)
     elif task_type == "Classification":
@@ -425,11 +485,20 @@ def select_features_model_based(x_train, x_test, y_train, task_type, threshold='
         logger.info(f"Error: Unknown task type '{task_type}'. Skipping selection.")
         return x_train, x_test, list(x_train.columns)
 
+    # Use a non-destructive threshold (e.g. 0.01*mean or 1e-4) so we only drop near-zero importance features
     selector = SelectFromModel(estimator=estimator, threshold=threshold)
     selector.fit(x_train, y_train)
 
     importance = selector.estimator_.feature_importances_
     kept_mask = selector.get_support()
+
+    # Safety: If selector dropped too many features (>70% dropped), keep at least top 80% features
+    if kept_mask.sum() < max(3, int(x_train.shape[1] * 0.3)):
+        logger.warning("SelectFromModel dropped too many features. Falling back to retaining top 80% features by importance.")
+        top_k = max(3, int(x_train.shape[1] * 0.8))
+        top_indices = np.argsort(importance)[::-1][:top_k]
+        kept_mask = np.zeros(len(importance), dtype=bool)
+        kept_mask[top_indices] = True
 
     importance_df = pd.DataFrame({
         'Feature': x_train.columns,
@@ -437,25 +506,15 @@ def select_features_model_based(x_train, x_test, y_train, task_type, threshold='
         'Kept': kept_mask
     }).sort_values(by='Importance', ascending=False)
 
-    # FIX 2: Matched 'Kept' (Capital K)
     kept_cols = importance_df[importance_df['Kept']]['Feature'].tolist()
     dropped_cols = importance_df[~importance_df['Kept']]['Feature'].tolist()
 
     logger.info("\n--- Top 10 Most Important Features (ExtraTrees) ---")
-    logger.info(importance_df.head(10).to_string(index=False))
+    logger.info(importance_df.head(15).to_string(index=False))
     logger.info(f"\nSummary: Kept {len(kept_cols)} features, Dropped {len(dropped_cols)} features.")
 
-    # FIX 3: Matched x_train and x_test (lowercase x)
-    x_train_selected = pd.DataFrame(
-        selector.transform(x_train),
-        columns=kept_cols,
-        index=x_train.index
-    )
-    x_test_selected = pd.DataFrame(
-        selector.transform(x_test),
-        columns=kept_cols,
-        index=x_test.index
-    )
+    x_train_selected = x_train[kept_cols].copy()
+    x_test_selected = x_test[kept_cols].copy()
     return x_train_selected, x_test_selected, kept_cols
 
 
@@ -464,12 +523,20 @@ def select_features_rfe(x_train, x_test, y_train, task_type, n_features_to_selec
     if task_type == "Clustering":
         logger.info("Skipping RFE Selection: Task type is Clustering (no target variable).")
         return x_train, x_test, list(x_train.columns)
-    if x_train.shape[1] > 50:
-        logger.warning(
-            f"Skipping RFE: Too many features ({x_train.shape[1]}) — "
-            f"model-based selection should have reduced this below 50 first."
+    
+    # If feature count is already compact (<= 25), skip RFE to prevent removing valuable correlated features
+    if x_train.shape[1] <= 25:
+        logger.info(
+            f"Skipping RFE: Feature count ({x_train.shape[1]}) is already optimal. Retaining all features."
         )
         return x_train, x_test, list(x_train.columns)
+
+    if x_train.shape[1] > 60:
+        logger.warning(
+            f"Skipping RFE: Too many features ({x_train.shape[1]}) for fast RFECV."
+        )
+        return x_train, x_test, list(x_train.columns)
+
     if task_type == "Regression":
         estimator = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
         metric = 'r2'
@@ -479,30 +546,22 @@ def select_features_rfe(x_train, x_test, y_train, task_type, n_features_to_selec
     else:
         logger.info(f"Error: Unknown task type '{task_type}'. Skipping selection.")
         return x_train, x_test, list(x_train.columns)
-    selector = RFECV(estimator=estimator, step=1, cv=5, scoring=metric)
+
+    min_features = max(5, int(x_train.shape[1] * 0.6))
+    selector = RFECV(estimator=estimator, step=1, cv=5, scoring=metric, min_features_to_select=min_features)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         selector.fit(x_train, y_train)
+
     kept_mask = selector.get_support()
     kept_cols = x_train.columns[kept_mask].tolist()
     eliminated_cols = x_train.columns[~kept_mask].tolist()
+
     logger.info(f"\nOptimal number of features found by CV: {selector.n_features_}")
-    logger.info(f"Eliminated {len(eliminated_cols)} features:")
-    # Print the dropped features so the user/logs can see exactly what RFE thought was useless
-    if eliminated_cols:
-        logger.info(", ".join(eliminated_cols))
-    else:
-        logger.info("None")
-    x_train_selected = pd.DataFrame(
-        selector.transform(x_train),
-        columns=kept_cols,
-        index=x_train.index
-    )
-    x_test_selected = pd.DataFrame(
-        selector.transform(x_test),
-        columns=kept_cols,
-        index=x_test.index
-    )
+    logger.info(f"Eliminated {len(eliminated_cols)} features: {eliminated_cols if eliminated_cols else 'None'}")
+
+    x_train_selected = x_train[kept_cols].copy()
+    x_test_selected = x_test[kept_cols].copy()
     return x_train_selected, x_test_selected, kept_cols
 
 
@@ -511,6 +570,7 @@ def save_feature_engineering_artifacts(
     poly_object,
     ai_derived_cols,
     aggregate_cols,
+    redundant_dropped,
     variance_dropped,
     univariate_scores,
     model_based_kept,
@@ -522,44 +582,25 @@ def save_feature_engineering_artifacts(
     """
     Saves all fitted feature engineering objects and produces
     feature_engineering_summary.json consumed by model_trainer.
-
-    Args:
-        poly_object         : Fitted PolynomialFeatures object (or None if skipped)
-        ai_derived_cols     : List of column names created by AI derivation
-        aggregate_cols      : List of column names created by aggregate step
-        variance_dropped    : List of columns removed by VarianceThreshold
-        univariate_scores   : DataFrame-as-dict with Feature/Score/P_Value per column
-        model_based_kept    : List of columns kept by ExtraTrees model-based selection
-        model_based_dropped : List of columns dropped by ExtraTrees model-based selection
-        rfe_selected        : List of columns surviving RFECV (final selected set)
-        final_feature_list  : Exact column list in X_train passed to model_trainer
-        output_dir          : Folder to save artifacts into
-
-    Returns:
-        summary dict (same content as feature_engineering_summary.json)
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Save fitted objects needed at inference time ───────────────────────────
-    # poly_object is needed to apply the same polynomial expansion to new data
     if poly_object is not None:
         joblib.dump(poly_object, out_dir / "poly_features.joblib")
         logger.info(f"Saved poly_features.joblib")
     else:
         logger.info("No polynomial object to save (step was skipped)")
 
-    # feature_selection_mask is the final column list — inference applies this
-    # to drop everything that didn't survive the full selection funnel
     joblib.dump(final_feature_list, out_dir / "feature_selection_mask.joblib")
     logger.info(f"Saved feature_selection_mask.joblib | {len(final_feature_list)} features")
 
-    # ── Build summary dict ─────────────────────────────────────────────────────
     summary = {
         "ai_derived_features":      ai_derived_cols,
         "aggregate_features":       aggregate_cols,
+        "redundant_dropped":        redundant_dropped or [],
         "variance_dropped":         variance_dropped,
-        "univariate_scores":        univariate_scores,   # list of {Feature, Score, P_Value}
+        "univariate_scores":        univariate_scores,
         "model_based_kept":         model_based_kept,
         "model_based_dropped":      model_based_dropped,
         "rfe_selected":             rfe_selected,
@@ -640,6 +681,13 @@ def run_feature_engineering(
     )
     logger.info(f"After aggregate — X_train: {X_train.shape}")
 
+    # ── Step 3b — Redundancy & Correlation De-duplication ─────────────────────
+    logger.info("STEP 3b — Redundant & Collinear Feature De-duplication")
+    X_train, X_test, redundant_dropped = drop_redundant_features(
+        X_train, X_test, threshold=0.95
+    )
+    logger.info(f"After redundancy filter — X_train: {X_train.shape}")
+
     # ── Step 4 — Variance Selection ───────────────────────────────────────────
     logger.info("STEP 4 — Variance Threshold Selection")
     X_train, X_test, variance_dropped = select_features_variance(X_train, X_test)
@@ -698,6 +746,7 @@ def run_feature_engineering(
         poly_object=poly_object,
         ai_derived_cols=ai_derived_cols,
         aggregate_cols=aggregate_cols,
+        redundant_dropped=redundant_dropped,
         variance_dropped=variance_dropped,
         univariate_scores=univariate_scores,
         model_based_kept=model_based_kept,

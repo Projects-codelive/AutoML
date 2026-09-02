@@ -11,6 +11,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 from scipy.stats import skew
 from sklearn.exceptions import ConvergenceWarning
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 
@@ -114,8 +115,18 @@ def _train_single_model(model_key, model_def, X_train, X_test, y_train, y_test, 
 
     try:
         # 1. Get fresh model instance
-        # Assuming get_model_instance is available in your module's namespace
         model = get_model_instance(task_type, model_key, params=None)
+
+        # Apply log-target transformation for positive skewed regression (e.g. price, income)
+        use_log_target = False
+        if task_type == "Regression" and y_train is not None:
+            if (y_train > 0).all() and skew(y_train) > 0.75:
+                use_log_target = True
+                model = TransformedTargetRegressor(
+                    regressor=model,
+                    func=np.log1p,
+                    inverse_func=np.expm1
+                )
 
         # ---------------------------------------------------------
         # SUPERVISED BRANCH (Classification & Regression)
@@ -370,15 +381,13 @@ def build_leaderboard(results: list[dict], task_type: str) -> list[dict]:
                     model["cv_rmse"] = -cv_mean
     elif task_type == "Clustering":
         def cluster_sort_key(model_result):
-            sil = model_result.get("silhouette", -1.0)
-            ch = model_result.get("calinski_harabasz", 0.0)
+            sil = model_result.get("silhouette")
+            ch = model_result.get("calinski_harabasz")
+            sil = -1.0 if sil is None else float(sil)
+            ch = 0.0 if ch is None else float(ch)
 
             # Special constraint: if silhouette == -1.0, push to bottom
             is_degenerate = 1 if sil == -1.0 else 0
-
-            # Sort ascending by is_degenerate (0s before 1s)
-            # Then descending by silhouette (-sil)
-            # Then descending by calinski_harabasz (-ch)
             return (is_degenerate, -sil, -ch)
         successful_models.sort(key=cluster_sort_key)
     else:

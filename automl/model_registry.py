@@ -111,7 +111,7 @@ def _build_regression_models() -> dict:
 def _build_classification_models() -> dict:
     registry = {
         "logistic_regression": {
-            "model": LogisticRegression(multi_class="auto",max_iter=1000, random_state=42, n_jobs=-1),
+            "model": LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1),
             "name": "Logistic Regression",
             "type": "linear",
             "supports_shap": True,

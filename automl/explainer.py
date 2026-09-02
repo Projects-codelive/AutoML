@@ -72,6 +72,10 @@ def _validate_explainer_inputs(final_best_model, X_train, X_test, task_type, fea
 
 
 def _select_shap_explainer(model, model_key, model_type, X_train, task_type):
+    # Rule 0: Unwrap TransformedTargetRegressor if present
+    if hasattr(model, "regressor_"):
+        model = model.regressor_
+
     # Rule 4: Clustering models (no SHAP)
     if task_type == "Clustering":
         return None, "cluster_profile"
@@ -788,8 +792,15 @@ def run_explainer(final_best_model, X_train, X_test, y_train, y_test,
     # BRANCH 1: CLUSTERING (Skip SHAP, use profiles)
     # ---------------------------------------------------------
     if task_type == "Clustering":
-        # Handle different clustering model implementations (e.g., KMeans vs DBSCAN)
-        labels = final_best_model.labels_ if hasattr(final_best_model, 'labels_') else final_best_model.predict(X_train)
+        fitted_model = final_best_model.get("fitted_model", final_best_model) if isinstance(final_best_model, dict) else final_best_model
+        labels = final_best_model.get("labels") if isinstance(final_best_model, dict) else None
+        if labels is None:
+            if hasattr(fitted_model, 'labels_'):
+                labels = fitted_model.labels_
+            elif hasattr(fitted_model, 'predict'):
+                labels = fitted_model.predict(X_train)
+            else:
+                labels = np.zeros(len(X_train))
 
         cluster_profiles = _compute_cluster_profiles(labels, X_train, feature_names)
 

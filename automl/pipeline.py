@@ -3,7 +3,8 @@ from pathlib import Path
 from automl.eda import run_basic_cleaning, run_eda
 from automl.evaluator import run_evaluator
 from automl.explainer import run_explainer
-from automl.feature_engineer import run_feature_engineering
+from automl.model_card import run_model_card
+from automl.report_generator import run_report_generator
 from automl.hpo import run_hpo
 from automl.model_registry import run_model_registry
 from automl.model_trainer import run_trainer
@@ -27,6 +28,8 @@ def run_pipeline(
     hpo_output_dir: str = "artifacts/hpo",
     evaluator_output_dir: str = "artifacts/evaluator",
     explainer_output_dir: str = "artifacts/explainer",
+    model_card_output_dir: str = "artifacts/model_card",
+    report_output_dir: str = "artifacts/report",
     hpo_n_trials: int = 50,
     hpo_top_n_models: int = 3,
     hpo_timeout_per_model: int = 600,
@@ -92,23 +95,13 @@ def run_pipeline(
     logger.info(f"X_train shape: {preprocessor_result['X_train'].shape}")
     logger.info(f"X_test shape : {preprocessor_result['X_test'].shape}")
 
-    # ── Step 6 — Feature Engineering ──────────────────────────────
-    logger.info("STEP 6 — Running Feature Engineering")
-    fe_result = run_feature_engineering(
-        X_train=preprocessor_result["X_train"],
-        X_test=preprocessor_result["X_test"],
-        y_train=preprocessor_result["y_train"],
-        y_test=preprocessor_result["y_test"],
-        task_type=task_type,
-        target_col=target_col,
-        eda_summary=eda_summary,
-        api_key=api_key,
-        output_dir=feature_engineer_output_dir
-    )
-    logger.info(f"Feature engineering complete | final X_train: {fe_result['X_train'].shape}")
+    X_train_proc = preprocessor_result["X_train"]
+    X_test_proc = preprocessor_result["X_test"]
+    y_train_proc = preprocessor_result["y_train"]
+    y_test_proc = preprocessor_result["y_test"]
 
-    # ── Step 7 — Model Registry ──────────────────────────────
-    logger.info("Step 7 — Model Registry")
+    # ── Step 6 — Model Registry ──────────────────────────────
+    logger.info("Step 6 — Model Registry")
     mr_result = run_model_registry(
         task_type=task_type,
         output_dir=model_registry_output_dir,
@@ -118,13 +111,13 @@ def run_pipeline(
         return None
     logger.info(f"Model Registry complete | artifacts saved to: {Path(model_registry_output_dir).resolve()}")
 
-    # ── Step 8 — Model Trainer ──────────────────────────────
-    logger.info("Step 8 — Model Trainer")
+    # ── Step 7 — Model Trainer ──────────────────────────────
+    logger.info("Step 7 — Model Trainer")
     mt_result = run_trainer(
-        X_train=fe_result["X_train"],
-        X_test=fe_result["X_test"],
-        y_train=fe_result["y_train"],
-        y_test=fe_result["y_test"],
+        X_train=X_train_proc,
+        X_test=X_test_proc,
+        y_train=y_train_proc,
+        y_test=y_test_proc,
         task_type=task_type,
         registry_result=mr_result,
         output_dir=model_trainer_output_dir,
@@ -136,14 +129,14 @@ def run_pipeline(
     best_model_name = mt_result.get("best_model", {}).get("model_name", "Unknown")
     logger.info(f"Model Trainer complete | best model: {best_model_name}")
 
-    # ── Step 9 — Hyperparameter Optimization (HPO) ────────────────────────
-    logger.info("Step 9 — Hyperparameter Optimization (HPO)")
+    # ── Step 8 — Hyperparameter Optimization (HPO) ────────────────────────
+    logger.info("Step 8 — Hyperparameter Optimization (HPO)")
     hpo_result = run_hpo(
         trainer_result=mt_result,
-        X_train=fe_result["X_train"],
-        X_test=fe_result["X_test"],
-        y_train=fe_result["y_train"],
-        y_test=fe_result["y_test"],
+        X_train=X_train_proc,
+        X_test=X_test_proc,
+        y_train=y_train_proc,
+        y_test=y_test_proc,
         task_type=task_type,
         registry_result=mr_result,
         n_trials=hpo_n_trials,
@@ -160,21 +153,21 @@ def run_pipeline(
     final_source = hpo_result["final_best_model"].get("source", "unknown").upper()
     logger.info(f"HPO complete | Final Best Model: {final_best_name} ({final_source})")
 
-    # ── Step 10 — Evaluator ─────────────────────────────────────────
-    logger.info("Step 10 — Running Model Evaluator")
+    # ── Step 9 — Evaluator ─────────────────────────────────────────
+    logger.info("Step 9 — Running Model Evaluator")
 
-    # Extract feature names (fallback to index/range if not explicitly available)
-    if hasattr(fe_result["X_train"], "columns"):
-        feature_names = fe_result["X_train"].columns.tolist()
+    # Extract feature names directly from preprocessed training set
+    if hasattr(X_train_proc, "columns"):
+        feature_names = X_train_proc.columns.tolist()
     else:
-        feature_names = fe_result.get("feature_names", [f"feature_{i}" for i in range(fe_result["X_train"].shape[1])])
+        feature_names = [f"feature_{i}" for i in range(X_train_proc.shape[1])]
 
     evaluator_result = run_evaluator(
         final_best_model=hpo_result["final_best_model"],
-        X_train=fe_result["X_train"],
-        X_test=fe_result["X_test"],
-        y_train=fe_result["y_train"],
-        y_test=fe_result["y_test"],
+        X_train=X_train_proc,
+        X_test=X_test_proc,
+        y_train=y_train_proc,
+        y_test=y_test_proc,
         task_type=task_type,
         target_col=target_col,
         feature_names=feature_names,
@@ -188,15 +181,15 @@ def run_pipeline(
     logger.info(f"Evaluator complete | artifacts saved to: {Path(evaluator_output_dir).resolve()}")
     logger.info(f"Evaluation Summary: {evaluator_result.get('evaluation_summary')}")
 
-    # ── Step 11 — Explainer ─────────────────────────────────────────
-    logger.info("Step 11 — Running Model Explainer")
+    # ── Step 10 — Explainer ─────────────────────────────────────────
+    logger.info("Step 10 — Running Model Explainer")
 
     explainer_result = run_explainer(
         final_best_model=hpo_result["final_best_model"],
-        X_train=fe_result["X_train"],
-        X_test=fe_result["X_test"],
-        y_train=fe_result["y_train"],
-        y_test=fe_result["y_test"],
+        X_train=X_train_proc,
+        X_test=X_test_proc,
+        y_train=y_train_proc,
+        y_test=y_test_proc,
         task_type=task_type,
         feature_names=feature_names,
         evaluator_result=evaluator_result,
@@ -208,6 +201,49 @@ def run_pipeline(
     else:
         logger.warning("Explainer step was skipped (e.g., unsupported model or SHAP missing).")
 
+    # ── Step 11 — Model Card ─────────────────────────────────────────
+    logger.info("Step 11 — Running Model Card")
+
+    prep_summary = preprocessor_result.get("preprocessor_summary", preprocessor_result) if preprocessor_result else {}
+    tr_summary = mt_result.get("trainer_summary", mt_result) if mt_result else {}
+    hp_summary = hpo_result.get("hpo_summary", hpo_result) if hpo_result else {}
+
+    model_card_result = run_model_card(
+        eda_summary=eda_summary,
+        preprocessor_summary=prep_summary,
+        feature_engineering_summary={},
+        trainer_summary=tr_summary,
+        hpo_summary=hp_summary,
+        evaluator_result=evaluator_result,
+        explainer_result=explainer_result,
+        final_best_model=hpo_result["final_best_model"],
+        task_type=task_type,
+        target_col=target_col,
+        dataset_path=path,
+        output_dir=model_card_output_dir
+    )
+
+    if model_card_result:
+        logger.info(f"Model Card complete | artifacts saved to: {Path(model_card_output_dir).resolve()}")
+
+    # ── Step 12 — Report Generator ───────────────────────────────────
+    logger.info("Step 12 — Running Report Generator")
+
+    card_data = model_card_result.get("model_card") if model_card_result else None
+
+    report_result = run_report_generator(
+        model_card=card_data,
+        evaluator_result=evaluator_result,
+        explainer_result=explainer_result,
+        task_type=task_type,
+        output_dir=report_output_dir
+    )
+
+    if report_result and report_result.get("status") == "success":
+        logger.info(f"Report Generator complete | PDF saved to: {Path(report_result['pdf_path']).resolve()}")
+    else:
+        logger.warning("Report generation encountered an issue or was skipped.")
+
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETED SUCCESSFULLY")
     logger.info("=" * 60)
@@ -215,12 +251,13 @@ def run_pipeline(
     return {
         "eda_summary": eda_summary,
         "preprocessor_result": preprocessor_result,
-        "feature_engineering_result": fe_result,
         "model_registry_result": mr_result,
         "model_trainer_result": mt_result,
         "hpo_result": hpo_result,
         "evaluator_result": evaluator_result,
         "explainer_result": explainer_result,
+        "model_card_result": model_card_result,
+        "report_result": report_result,
     }
 
 
@@ -237,5 +274,7 @@ if __name__ == "__main__":
         hpo_output_dir="../artifacts/hpo",
         evaluator_output_dir="../artifacts/evaluator",
         explainer_output_dir="../artifacts/explainer",
+        model_card_output_dir="../artifacts/model_card",
+        report_output_dir="../artifacts/report",
         api_key=os.getenv("OPENAI_API_KEY")
     )

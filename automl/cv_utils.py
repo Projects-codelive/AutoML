@@ -35,6 +35,17 @@ def get_cv_strategy(task_type: str, y_train, n_splits: int = 5):
         return KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     if task_type == "Classification":
+        class_counts = y_train.value_counts()
+        min_class = int(class_counts.min()) if len(class_counts) > 0 else 1
+        if min_class < 2 or n_splits > min_class:
+            n_splits_safe = max(2, min(n_splits, min_class))
+            if min_class < 2 or n_splits_safe < 2:
+                logger.warning(f"Class count too small for StratifiedKFold (min class count = {min_class}). Falling back to KFold.")
+                n_splits_safe = max(2, min(n_splits, len(y_train)))
+                return KFold(n_splits=n_splits_safe, shuffle=True, random_state=42)
+            logger.warning(f"n_splits reduced to {n_splits_safe} for StratifiedKFold due to class count.")
+            return StratifiedKFold(n_splits=n_splits_safe, shuffle=True, random_state=42)
+        
         distribution = y_train.value_counts(normalize=True)
         if (distribution < 0.10).any():
             logger.debug("Imbalanced classes detected. Using StratifiedKFold.")
